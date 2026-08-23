@@ -31,7 +31,8 @@ http_test_() ->
      [
       {"health check answers 200", fun health/0},
       {"store, read back, clear, read again", fun store_get_delete_cycle/0},
-      {"a cleared key reads as if never set", fun cleared_matches_never_set/0}
+      {"a cleared key reads as if never set", fun cleared_matches_never_set/0},
+      {"malformed JSON is a 400, not a crash", fun malformed_json/0}
      ]}.
 
 setup() ->
@@ -80,6 +81,17 @@ cleared_matches_never_set() ->
     ?assertEqual(maps:get(<<"error">>, NeverBody),
                  maps:get(<<"error">>, ClearedBody)).
 
+malformed_json() ->
+    %% jsx:decode/2 raises on every one of these. Unguarded that crashed
+    %% the handler, so the client saw a 500 where it should see a 400.
+    ?assertMatch({400, _}, request(post, "/store", "")),
+    ?assertMatch({400, _}, request(post, "/store", "{not json")),
+    ?assertMatch({400, _}, request(post, "/store/somekey", "")),
+    ?assertMatch({400, _}, request(put, "/store/somekey", "<xml/>")).
+
+%% ===================================================================
+%% Helpers
+%% ===================================================================
 
 stop_stray_store() ->
     case whereis(kv_store) of

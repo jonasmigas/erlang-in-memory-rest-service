@@ -175,8 +175,8 @@ handle_request(_, _, Req, State) ->
 handle_post(Req, State) ->
     case read_body(Req) of
         {ok, Body, Req2} ->
-            case jsx:decode(Body, [return_maps]) of
-                #{<<"key">> := Key, <<"value">> := Value} when is_binary(Key), Key /= <<>> ->
+            case decode_json(Body) of
+                {ok, #{<<"key">> := Key, <<"value">> := Value}} when is_binary(Key), Key /= <<>> ->
                     KeyStr = binary_to_list(Key),
                     case kv_store:set(KeyStr, Value) of
                         ok ->
@@ -186,7 +186,7 @@ handle_post(Req, State) ->
                             Response = jsx:encode(#{error => <<"invalid_key">>}),
                             {reply(400, Response, Req2), State}
                     end;
-                #{<<"key">> := Key} when is_binary(Key) ->
+                {ok, #{<<"key">> := Key}} when is_binary(Key) ->
                     %% Missing value
                     Response = jsx:encode(#{error => <<"missing_value">>}),
                     {reply(400, Response, Req2), State};
@@ -205,8 +205,8 @@ handle_post(Req, State) ->
 handle_post_with_key(Key, Req, State) when is_list(Key), Key /= [] ->
     case read_body(Req) of
         {ok, Body, Req2} ->
-            case jsx:decode(Body, [return_maps]) of
-                #{<<"value">> := Value} ->
+            case decode_json(Body) of
+                {ok, #{<<"value">> := Value}} ->
                     case kv_store:set(Key, Value) of
                         ok ->
                             Response = jsx:encode(#{key => list_to_binary(Key), value => Value, status => <<"stored">>}),
@@ -254,6 +254,16 @@ extract_key(Path) ->
             {error, missing_key};
         _ ->
             {error, missing_key}
+    end.
+
+%% jsx:decode/2 raises on malformed input rather than returning an error,
+%% so every call has to be guarded or the handler crashes into a 500.
+-spec decode_json(binary()) -> {ok, jsx:json_term()} | {error, invalid_json}.
+decode_json(Body) ->
+    try jsx:decode(Body, [return_maps]) of
+        Decoded -> {ok, Decoded}
+    catch
+        _:_ -> {error, invalid_json}
     end.
 
 -spec read_body(cowboy_req:req()) -> {ok, binary(), cowboy_req:req()} | {error, any()}.
