@@ -64,6 +64,7 @@ http_test_() ->
       {"the health route tolerates a trailing slash",
        fun health_trailing_slash/0},
       {"head answers wherever get does", fun head_mirrors_get/0},
+      {"an unmatched path is a json 404", fun unmatched_path_is_json/0},
       {"stopping the listener child stops the listener",
        {timeout, 30, fun listener_restart/0}}
      ]}.
@@ -203,6 +204,23 @@ health_rejects_writes() ->
     ?assertMatch({405, _}, request(delete, "/health")),
     %% and the store is untouched by any of them
     ?assertMatch({404, _}, request(get, "/store/via_health")).
+
+unmatched_path_is_json() ->
+    %% The README promises every response is JSON, but an unmatched path
+    %% never reached this handler: cowboy's router replied 404 with no
+    %% body and no content-type, so a client decoding error bodies parsed
+    %% one 404 and crashed on the other. decode([]) returning #{} in this
+    %% suite is what let it go unnoticed, so assert on the field.
+    {Status, Body} = request(get, "/nope"),
+    ?assertEqual(404, Status),
+    ?assertEqual(<<"not_found">>, maps:get(<<"error">>, Body)),
+    %% deeper than the store route accepts
+    {DeepStatus, DeepBody} = request(get, "/store/a/b"),
+    ?assertEqual(404, DeepStatus),
+    ?assertEqual(<<"not_found">>, maps:get(<<"error">>, DeepBody)),
+    %% and a missing key still reports as a missing key, not a bad path
+    ?assertMatch({404, #{<<"error">> := <<"key_not_found">>}},
+                 request(get, "/store/never_written_json")).
 
 head_mirrors_get() ->
     %% HEAD used to fall to the method-not-allowed clause, so curl -I and

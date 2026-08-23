@@ -16,7 +16,7 @@
 -define(STORE_METHODS, [<<"GET">>, <<"HEAD">>, <<"POST">>, <<"PUT">>, <<"DELETE">>]).
 -define(HEALTH_METHODS, [<<"GET">>, <<"HEAD">>]).
 
--type route() :: store | health.
+-type route() :: store | health | not_found.
 
 %% ===================================================================
 %% Supervisor child API
@@ -67,7 +67,12 @@ dispatch() ->
     cowboy_router:compile([
         {'_', [
             {"/store/[:key]", ?MODULE, store},
-            {"/health", ?MODULE, health}
+            {"/health", ?MODULE, health},
+            %% Last, so it catches only what the routes above did not.
+            %% Without it cowboy's router answers an unmatched path
+            %% itself, with a bodiless 404 -- the one response in the API
+            %% that a client could not decode as JSON.
+            {'_', ?MODULE, not_found}
         ]}
     ]).
 
@@ -88,6 +93,9 @@ init(Req0, Route) ->
     {ok, Req, Route}.
 
 -spec handle_request(route(), binary(), cowboy_req:req()) -> cowboy_req:req().
+handle_request(not_found, _Method, Req) ->
+    reply(404, #{error => <<"not_found">>}, Req);
+
 handle_request(health, <<"GET">>, Req) ->
     reply(200, #{status => ok, timestamp => os:system_time(second)}, Req);
 handle_request(health, _Method, Req) ->
