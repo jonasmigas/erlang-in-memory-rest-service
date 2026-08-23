@@ -103,14 +103,28 @@ on 8080; under Docker (`make up`) use 18080.
 | Method | Endpoint | Request body | Success | Errors |
 |--------|----------|--------------|---------|--------|
 | `GET` | `/store/:key` | — | `200` `{"key":...,"value":...}` | `404` `key_not_found` |
-| `POST` | `/store/:key` | `{"value": ...}` | `201` | `400`, `413` |
-| `POST` | `/store` | `{"key": ..., "value": ...}` | `201` | `400`, `413` |
-| `PUT` | `/store/:key` | `{"value": ...}` | `201` | `400`, `413` |
+| `POST` | `/store/:key` | `{"value": ...}` | `201` created / `200` replaced | `400`, `408`, `413` |
+| `POST` | `/store` | `{"key": ..., "value": ...}` | `201` created / `200` replaced | `400`, `408`, `413` |
+| `PUT` | `/store/:key` | `{"value": ...}` | `201` created / `200` replaced | `400`, `408`, `413` |
 | `DELETE` | `/store/:key` | — | `204` | `404` `key_not_found` |
 | `GET` | `/health` | — | `200` `{"status":"ok",...}` | — |
 
-An unsupported method returns `405`. A missing or empty key, or a malformed
-JSON body, returns `400`. A body over the size limit returns `413`.
+`HEAD` is accepted wherever `GET` is, and returns the same status with no
+body.
+
+A write answers `201` only when it created the key; replacing an existing
+one is a `200`, so a client can tell the two apart from the status alone.
+
+A method the route does not serve returns `405` with an `Allow` header
+naming the ones it does -- `/health` serves reads only, and will not
+accept a write. A path that matches no route returns `404` `not_found`.
+
+A missing or empty key, or a malformed JSON body, returns `400`. A body
+over the size limit returns `413`; one that stops arriving part-way
+returns `408`, which is retryable where `413` is not. If the store itself
+cannot be reached, the answer is `503` `store_unavailable` -- the HTTP
+listener stays up across a store restart, so this is a state a client can
+observe.
 
 Reading a key that holds no data is always a `404` with an explicit
 `key_not_found` error, never an empty `200` -- a client can tell "no data

@@ -1,12 +1,10 @@
 %%%-------------------------------------------------------------------
-%%% @doc Cowboy HTTP server for the KV Store REST API.
-%%% Provides endpoints for set, get, delete operations.
+%%% @doc Cowboy HTTP handler for the KV Store REST API.
+%%% Serves the key-value routes and a health check.
 %%%-------------------------------------------------------------------
 -module(kv_http).
--behaviour(application).
+-behaviour(cowboy_handler).
 
-%% Application callbacks
--export([start/0, start/2, stop/0, stop/1]).
 %% Supervisor child API
 -export([child_spec/0]).
 %% Cowboy handler
@@ -14,6 +12,13 @@
 
 -define(DEFAULT_PORT, 8080).
 -define(MAX_BODY_SIZE, 1048576).  %% 1MB
+-define(READ_PERIOD, 5000).       %% per chunk
+-define(BODY_DEADLINE, 15000).    %% for the whole body
+
+-define(STORE_METHODS, [<<"GET">>, <<"HEAD">>, <<"POST">>, <<"PUT">>, <<"DELETE">>]).
+-define(HEALTH_METHODS, [<<"GET">>, <<"HEAD">>]).
+
+-type route() :: store | health | not_found.
 
 %% ===================================================================
 %% Supervisor child API
@@ -47,223 +52,217 @@ port() ->
     application:get_env(kv_store, port, ?DEFAULT_PORT).
 
 %% ===================================================================
-%% Application callbacks (for running as a child)
+%% Routing
 %% ===================================================================
 
--spec start() -> {ok, pid()} | {error, any()}.
-start() ->
-    start(permanent, []).
-
--spec start(application:start_type(), any()) -> {ok, pid()} | {error, any()}.
-start(_StartType, _StartArgs) ->
-    start_http_server().
-
--spec stop() -> ok.
-stop() ->
-    stop(ok).
-
--spec stop(any()) -> ok.
-stop(_State) ->
-    cowboy:stop_listener(?MODULE).
-
-%% ===================================================================
-%% Internal: Start Cowboy
-%% ===================================================================
-
+%% Each route names itself, and that name is what the handler dispatches
+%% on. Deriving the resource from the request instead -- a path literal,
+%% or the absence of the :key binding -- makes the handler disagree with
+%% the router: /health has no :key either, so it used to reach the store
+%% clauses, and POST /health wrote to the store.
+%%
+%% The optional segment in "/store/[:key]" already matches /store and
+%% /store/ with the binding unset, so no separate "/store" entry is
+%% needed for the key-in-the-body form.
 -spec dispatch() -> cowboy_router:dispatch_rules().
 dispatch() ->
     cowboy_router:compile([
         {'_', [
-            {"/store/[:key]", ?MODULE, []},      %% GET, POST, PUT, DELETE
-            {"/store", ?MODULE, []},             %% POST (alternative)
-            {"/health", ?MODULE, []}             %% Health check
+            {"/store/[:key]", ?MODULE, store},
+            {"/health", ?MODULE, health},
+            %% Last, so it catches only what the routes above did not.
+            %% Without it cowboy's router answers an unmatched path
+            %% itself, with a bodiless 404 -- the one response in the API
+            %% that a client could not decode as JSON.
+            {'_', ?MODULE, not_found}
         ]}
     ]).
-
-start_http_server() ->
-    {ok, _Pid} = cowboy:start_clear(?MODULE,
-        [{port, port()}],
-        #{env => #{dispatch => dispatch()}}
-    ),
-    io:format("~n~s HTTP Server started on port ~p~n", [?MODULE, port()]),
-    {ok, self()}.
 
 %% ===================================================================
 %% Cowboy HTTP Handler
 %% ===================================================================
 
--spec init(cowboy_req:req(), any()) -> {cowboy_loop, cowboy_req:req(), any()}.
-init(Req0, State) ->
-    Method = cowboy_req:method(Req0),
-    Path = cowboy_req:path(Req0),
+-spec init(cowboy_req:req(), route()) -> {ok, cowboy_req:req(), route()}.
+init(Req0, Route) ->
+    %% HEAD must answer wherever GET does. cowboy_req:reply/4 drops the
+    %% body for a HEAD request on its own, so the GET clauses serve both
+    %% and only the response body differs.
+    Method = case cowboy_req:method(Req0) of
+                 <<"HEAD">> -> <<"GET">>;
+                 Other -> Other
+             end,
+    Req = handle_request(Route, Method, Req0),
+    {ok, Req, Route}.
 
-    %% Handle the request based on method and path
-    {Req, Resp} = handle_request(Method, Path, Req0, State),
-    {ok, Req, Resp}.
+-spec handle_request(route(), binary(), cowboy_req:req()) -> cowboy_req:req().
+handle_request(not_found, _Method, Req) ->
+    reply(404, #{error => <<"not_found">>}, Req);
 
--spec handle_request(binary(), binary(), cowboy_req:req(), any()) ->
-    {cowboy_req:req(), any()}.
-handle_request(<<"GET">>, <<"/health">>, Req, State) ->
-    %% Health check endpoint
-    Response = jsx:encode(#{status => ok, timestamp => os:system_time(second)}),
-    {reply(200, Response, Req), State};
+handle_request(health, <<"GET">>, Req) ->
+    reply(200, #{status => ok, timestamp => os:system_time(second)}, Req);
+handle_request(health, _Method, Req) ->
+    method_not_allowed(?HEALTH_METHODS, Req);
 
-handle_request(<<"GET">>, _Path, Req, State) ->
+handle_request(store, <<"GET">>, Req) ->
     %% GET /store/{key}
+    with_key(Req, fun(Key) ->
+        case call_store(fun() -> kv_store:get(Key) end) of
+            {ok, Key, Value} ->
+                reply(200, #{key => list_to_binary(Key), value => Value}, Req);
+            {error, not_found} ->
+                reply(404, #{error => <<"key_not_found">>,
+                             key => list_to_binary(Key)}, Req);
+            {error, invalid_key} ->
+                reply(400, #{error => <<"invalid_key">>}, Req);
+            {error, unavailable} ->
+                unavailable(Req)
+        end
+    end);
+
+%% POST /store/{key} with {"value": ...}, or POST /store with the key in
+%% the body. /store and /store/ both route here with no :key binding.
+handle_request(store, <<"POST">>, Req) ->
     case extract_key(Req) of
-        {ok, Key} ->
-            case kv_store:get(Key) of
-                {ok, Key, Value} ->
-                    Response = jsx:encode(#{key => list_to_binary(Key), value => Value}),
-                    {reply(200, Response, Req), State};
-                {error, not_found} ->
-                    Response = jsx:encode(#{error => <<"key_not_found">>, key => list_to_binary(Key)}),
-                    {reply(404, Response, Req), State};
-                {error, invalid_key} ->
-                    Response = jsx:encode(#{error => <<"invalid_key">>}),
-                    {reply(400, Response, Req), State}
-            end;
-        {error, missing_key} ->
-            Response = jsx:encode(#{error => <<"missing_key">>}),
-            {reply(400, Response, Req), State}
+        {ok, Key} -> store_with_key(Key, Req);
+        {error, missing_key} -> store_from_body(Req)
     end;
 
-handle_request(<<"POST">>, <<"/store">>, Req, State) ->
-    %% POST /store with JSON body: {"key": "mykey", "value": "myvalue"}
-    handle_post(Req, State);
-
-handle_request(<<"POST">>, Path, Req, State) when Path =:= <<"/store/">> orelse Path =:= <<"/store/ ">> ->
-    handle_post(Req, State);
-
-handle_request(<<"POST">>, _Path, Req, State) ->
-    %% POST /store/{key} with JSON body: {"value": "myvalue"}
-    case extract_key(Req) of
-        {ok, Key} ->
-            handle_post_with_key(Key, Req, State);
-        {error, missing_key} ->
-            %% Try to read from body instead
-            handle_post(Req, State)
-    end;
-
-handle_request(<<"PUT">>, _Path, Req, State) ->
+handle_request(store, <<"PUT">>, Req) ->
     %% PUT /store/{key} with JSON body: {"value": "myvalue"}
     case extract_key(Req) of
-        {ok, Key} ->
-            handle_put(Key, Req, State);
-        {error, missing_key} ->
-            Response = jsx:encode(#{error => <<"key_required_in_path">>}),
-            {reply(400, Response, Req), State}
+        {ok, Key} -> store_with_key(Key, Req);
+        {error, missing_key} -> reply(400, #{error => <<"key_required_in_path">>}, Req)
     end;
 
-handle_request(<<"DELETE">>, _Path, Req, State) ->
+handle_request(store, <<"DELETE">>, Req) ->
     %% DELETE /store/{key}
-    case extract_key(Req) of
-        {ok, Key} ->
-            case kv_store:delete(Key) of
-                ok ->
-                    {reply(204, Req), State};
-                {error, not_found} ->
-                    Response = jsx:encode(#{error => <<"key_not_found">>, key => list_to_binary(Key)}),
-                    {reply(404, Response, Req), State};
-                {error, invalid_key} ->
-                    Response = jsx:encode(#{error => <<"invalid_key">>}),
-                    {reply(400, Response, Req), State}
-            end;
-        {error, missing_key} ->
-            Response = jsx:encode(#{error => <<"missing_key">>}),
-            {reply(400, Response, Req), State}
-    end;
+    with_key(Req, fun(Key) ->
+        case call_store(fun() -> kv_store:delete(Key) end) of
+            ok ->
+                reply(204, Req);
+            {error, not_found} ->
+                reply(404, #{error => <<"key_not_found">>,
+                             key => list_to_binary(Key)}, Req);
+            {error, invalid_key} ->
+                reply(400, #{error => <<"invalid_key">>}, Req);
+            {error, unavailable} ->
+                unavailable(Req)
+        end
+    end);
 
-handle_request(_, _, Req, State) ->
-    %% Method not allowed
-    Response = jsx:encode(#{error => <<"method_not_allowed">>}),
-    {reply(405, Response, Req), State}.
+handle_request(store, _Method, Req) ->
+    method_not_allowed(?STORE_METHODS, Req).
 
 %% ===================================================================
-%% Helper functions for handling POST/PUT
+%% Helper functions for storing a value
 %% ===================================================================
 
-handle_post(Req, State) ->
+%% The key comes from the body: {"key": "mykey", "value": "myvalue"}.
+store_from_body(Req) ->
     case read_body(Req) of
         {ok, Body, Req2} ->
             case decode_json(Body) of
                 {ok, #{<<"key">> := Key, <<"value">> := Value}} when is_binary(Key), Key /= <<>> ->
                     KeyStr = binary_to_list(Key),
-                    case kv_store:set(KeyStr, Value) of
-                        ok ->
-                            Response = jsx:encode(#{key => Key, value => Value, status => <<"stored">>}),
-                            {reply(201, Response, Req2), State};
+                    case call_store(fun() -> kv_store:set(KeyStr, Value) end) of
+                        {ok, Outcome} ->
+                            reply(created_or_ok(Outcome),
+                                  #{key => Key, value => Value,
+                                    status => <<"stored">>}, Req2);
                         {error, invalid_key} ->
-                            Response = jsx:encode(#{error => <<"invalid_key">>}),
-                            {reply(400, Response, Req2), State}
+                            reply(400, #{error => <<"invalid_key">>}, Req2);
+                        {error, unavailable} ->
+                            unavailable(Req2)
                     end;
                 {ok, #{<<"key">> := Key}} when is_binary(Key) ->
                     %% Missing value
-                    Response = jsx:encode(#{error => <<"missing_value">>}),
-                    {reply(400, Response, Req2), State};
+                    reply(400, #{error => <<"missing_value">>}, Req2);
                 _ ->
-                    Response = jsx:encode(#{error => <<"invalid_json">>, message => <<"Expected {\"key\":\"...\", \"value\":\"...\"}">>}),
-                    {reply(400, Response, Req2), State}
+                    reply(400, #{error => <<"invalid_json">>,
+                                 message => <<"Expected {\"key\":\"...\", \"value\":\"...\"}">>}, Req2)
             end;
         {error, too_large} ->
-            Response = jsx:encode(#{error => <<"request_too_large">>}),
-            {reply(413, Response, Req), State};
-        {error, _} ->
-            Response = jsx:encode(#{error => <<"bad_request">>}),
-            {reply(400, Response, Req), State}
+            reply(413, #{error => <<"request_too_large">>}, Req);
+        {error, timeout} ->
+            reply(408, #{error => <<"request_timeout">>}, Req);
+        {error, bad_request} ->
+            reply(400, #{error => <<"bad_request">>}, Req)
     end.
 
-handle_post_with_key(Key, Req, State) when is_list(Key), Key /= [] ->
+%% The key came from the path, so the body carries only {"value": ...}.
+%% extract_key/1 never yields an empty key, so there is no empty-key
+%% clause here.
+store_with_key(Key, Req) ->
     case read_body(Req) of
         {ok, Body, Req2} ->
             case decode_json(Body) of
                 {ok, #{<<"value">> := Value}} ->
-                    case kv_store:set(Key, Value) of
-                        ok ->
-                            Response = jsx:encode(#{key => list_to_binary(Key), value => Value, status => <<"stored">>}),
-                            {reply(201, Response, Req2), State};
+                    case call_store(fun() -> kv_store:set(Key, Value) end) of
+                        {ok, Outcome} ->
+                            reply(created_or_ok(Outcome),
+                                  #{key => list_to_binary(Key), value => Value,
+                                    status => <<"stored">>}, Req2);
                         {error, invalid_key} ->
-                            Response = jsx:encode(#{error => <<"invalid_key">>}),
-                            {reply(400, Response, Req2), State}
+                            reply(400, #{error => <<"invalid_key">>}, Req2);
+                        {error, unavailable} ->
+                            unavailable(Req2)
                     end;
                 _ ->
-                    Response = jsx:encode(#{error => <<"invalid_json">>, message => <<"Expected {\"value\":\"...\"}">>}),
-                    {reply(400, Response, Req2), State}
+                    reply(400, #{error => <<"invalid_json">>,
+                                 message => <<"Expected {\"value\":\"...\"}">>}, Req2)
             end;
         {error, too_large} ->
-            Response = jsx:encode(#{error => <<"request_too_large">>}),
-            {reply(413, Response, Req), State};
-        {error, _} ->
-            Response = jsx:encode(#{error => <<"bad_request">>}),
-            {reply(400, Response, Req), State}
-    end;
-handle_post_with_key(_Key, Req, State) ->
-    Response = jsx:encode(#{error => <<"invalid_key">>}),
-    {reply(400, Response, Req), State}.
-
-handle_put(Key, Req, State) when is_list(Key), Key /= [] ->
-    %% PUT is handled the same as POST with key in path
-    handle_post_with_key(Key, Req, State);
-handle_put(_Key, Req, State) ->
-    Response = jsx:encode(#{error => <<"invalid_key">>}),
-    {reply(400, Response, Req), State}.
+            reply(413, #{error => <<"request_too_large">>}, Req);
+        {error, timeout} ->
+            reply(408, #{error => <<"request_timeout">>}, Req);
+        {error, bad_request} ->
+            reply(400, #{error => <<"bad_request">>}, Req)
+    end.
 
 %% ===================================================================
 %% Helper functions
 %% ===================================================================
+
+%% 201 only when the write actually created the key. RFC 7231 requires
+%% 200 or 204 when the target already had a representation, so a client
+%% can tell a create from an update by the status alone.
+-spec created_or_ok(created | updated) -> 201 | 200.
+created_or_ok(created) -> 201;
+created_or_ok(updated) -> 200.
+
+%% kv_store is one gen_server, so a busy or restarting store makes every
+%% call exit -- timeout after call_timeout(), or noproc while the
+%% supervisor brings it back. Uncaught, that exit leaves cowboy to answer
+%% with a bodiless 500, the one response a JSON client cannot read. The
+%% listener deliberately survives a store restart (one_for_one), so this
+%% window is reachable in normal operation, and 503 is the honest answer.
+-spec call_store(fun(() -> Result)) -> Result | {error, unavailable}.
+call_store(Fun) ->
+    try Fun()
+    catch
+        exit:_ -> {error, unavailable}
+    end.
+
+unavailable(Req) ->
+    reply(503, #{error => <<"store_unavailable">>}, Req).
+
+%% Run Fun with the path key, or answer 400 when the route carried none.
+-spec with_key(cowboy_req:req(), fun((string()) -> cowboy_req:req())) ->
+    cowboy_req:req().
+with_key(Req, Fun) ->
+    case extract_key(Req) of
+        {ok, Key} -> Fun(Key);
+        {error, missing_key} -> reply(400, #{error => <<"missing_key">>}, Req)
+    end.
 
 -spec extract_key(cowboy_req:req()) -> {ok, string()} | {error, missing_key}.
 extract_key(Req) ->
     %% The :key binding is already percent-decoded by cowboy, so a key
     %% written as {"key": "my key"} and read back as /store/my%20key
     %% resolve to the same entry. Splitting the raw path does not.
-    case cowboy_req:binding(key, Req) of
-        undefined ->
-            {error, missing_key};
-        <<>> ->
-            {error, missing_key};
-        Key ->
-            {ok, binary_to_list(Key)}
+    case cowboy_req:binding(key, Req, <<>>) of
+        <<>> -> {error, missing_key};
+        Key -> {ok, binary_to_list(Key)}
     end.
 
 %% jsx:decode/2 raises on malformed input rather than returning an error,
@@ -276,29 +275,72 @@ decode_json(Body) ->
         _:_ -> {error, invalid_json}
     end.
 
--spec read_body(cowboy_req:req()) -> {ok, binary(), cowboy_req:req()} | {error, any()}.
+%% cowboy_req:read_body/2 answers {more, ...} for two different reasons:
+%% the length it was asked for is available, or the read period expired
+%% with the body still incomplete. Matching only {ok, ...} and calling
+%% every other outcome too_large told a client on a slow link that its
+%% 19-byte body was over the 1MB cap, and dropped the write. Accumulate
+%% instead, and separate "over the cap" from "ran out of time".
+-spec read_body(cowboy_req:req()) ->
+    {ok, binary(), cowboy_req:req()} | {error, too_large | timeout | bad_request}.
 read_body(Req) ->
-    try
-        {ok, Body, Req2} = cowboy_req:read_body(Req, #{length => ?MAX_BODY_SIZE}),
-        {ok, Body, Req2}
-    catch
-        _:_ ->
-            {error, too_large}
+    read_body(Req, <<>>, erlang:monotonic_time(millisecond) + body_deadline()).
+
+read_body(Req, Acc, Deadline) ->
+    case Deadline - erlang:monotonic_time(millisecond) of
+        Left when Left =< 0 ->
+            {error, timeout};
+        Left ->
+            Opts = #{length => ?MAX_BODY_SIZE, period => min(Left, ?READ_PERIOD)},
+            try cowboy_req:read_body(Req, Opts) of
+                {ok, Data, Req2} ->
+                    Body = <<Acc/binary, Data/binary>>,
+                    case byte_size(Body) > ?MAX_BODY_SIZE of
+                        true -> {error, too_large};
+                        false -> {ok, Body, Req2}
+                    end;
+                {more, Data, Req2} ->
+                    Body = <<Acc/binary, Data/binary>>,
+                    case byte_size(Body) >= ?MAX_BODY_SIZE of
+                        true -> {error, too_large};
+                        false -> read_body(Req2, Body, Deadline)
+                    end
+            catch
+                %% cowboy exits with timeout of its own once the period
+                %% is well past; anything else is a broken request.
+                exit:_ -> {error, timeout};
+                _:_ -> {error, bad_request}
+            end
     end.
+
+%% How long a whole body may take to arrive. Overridable so a deployment
+%% behind a slow link can raise it, and so the test does not have to
+%% spend the default waiting.
+body_deadline() ->
+    application:get_env(kv_store, body_deadline, ?BODY_DEADLINE).
 
 -spec reply(integer(), cowboy_req:req()) -> cowboy_req:req().
 reply(StatusCode, Req) ->
-    cowboy_req:reply(StatusCode, #{
-        <<"content-type">> => <<"application/json">>
-    }, Req).
+    cowboy_req:reply(StatusCode, json_headers(), Req).
 
 -spec reply(integer(), binary() | map(), cowboy_req:req()) -> cowboy_req:req().
-reply(StatusCode, Body, Req) when is_binary(Body) ->
-    cowboy_req:reply(StatusCode, #{
-        <<"content-type">> => <<"application/json">>
-    }, Body, Req);
 reply(StatusCode, Body, Req) when is_map(Body) ->
-    reply(StatusCode, jsx:encode(Body), Req).
+    reply(StatusCode, jsx:encode(Body), Req);
+reply(StatusCode, Body, Req) when is_binary(Body) ->
+    cowboy_req:reply(StatusCode, json_headers(), Body, Req).
+
+%% RFC 7231 makes Allow mandatory on a 405, so a client that guessed the
+%% method wrong can discover what the resource does support.
+-spec method_not_allowed([binary()], cowboy_req:req()) -> cowboy_req:req().
+method_not_allowed(Allowed, Req) ->
+    Headers = maps:put(<<"allow">>,
+                       iolist_to_binary(lists:join(<<", ">>, Allowed)),
+                       json_headers()),
+    cowboy_req:reply(405, Headers,
+                     jsx:encode(#{error => <<"method_not_allowed">>}), Req).
+
+json_headers() ->
+    #{<<"content-type">> => <<"application/json">>}.
 
 -spec terminate(term(), cowboy_req:req(), any()) -> ok.
 terminate(_Reason, _Req, _State) ->
