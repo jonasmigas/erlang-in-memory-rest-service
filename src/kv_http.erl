@@ -13,8 +13,8 @@
 -define(DEFAULT_PORT, 8080).
 -define(MAX_BODY_SIZE, 1048576).  %% 1MB
 
--define(STORE_METHODS, [<<"GET">>, <<"POST">>, <<"PUT">>, <<"DELETE">>]).
--define(HEALTH_METHODS, [<<"GET">>]).
+-define(STORE_METHODS, [<<"GET">>, <<"HEAD">>, <<"POST">>, <<"PUT">>, <<"DELETE">>]).
+-define(HEALTH_METHODS, [<<"GET">>, <<"HEAD">>]).
 
 -type route() :: store | health.
 
@@ -77,7 +77,13 @@ dispatch() ->
 
 -spec init(cowboy_req:req(), route()) -> {ok, cowboy_req:req(), route()}.
 init(Req0, Route) ->
-    Method = cowboy_req:method(Req0),
+    %% HEAD must answer wherever GET does. cowboy_req:reply/4 drops the
+    %% body for a HEAD request on its own, so the GET clauses serve both
+    %% and only the response body differs.
+    Method = case cowboy_req:method(Req0) of
+                 <<"HEAD">> -> <<"GET">>;
+                 Other -> Other
+             end,
     Req = handle_request(Route, Method, Req0),
     {ok, Req, Route}.
 

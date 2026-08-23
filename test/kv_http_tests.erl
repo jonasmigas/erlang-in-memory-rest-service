@@ -63,6 +63,7 @@ http_test_() ->
       {"the health route serves no writes", fun health_rejects_writes/0},
       {"the health route tolerates a trailing slash",
        fun health_trailing_slash/0},
+      {"head answers wherever get does", fun head_mirrors_get/0},
       {"stopping the listener child stops the listener",
        {timeout, 30, fun listener_restart/0}}
      ]}.
@@ -184,7 +185,8 @@ method_not_allowed() ->
     ?assertEqual(<<"method_not_allowed">>, maps:get(<<"error">>, Body)),
     %% RFC 7231 makes Allow mandatory on a 405. Asserting only the status
     %% and body would pin its absence as correct.
-    ?assertEqual("GET, POST, PUT, DELETE", proplists:get_value("allow", Headers)).
+    ?assertEqual("GET, HEAD, POST, PUT, DELETE",
+                 proplists:get_value("allow", Headers)).
 
 health_rejects_writes() ->
     %% /health shares a handler module with /store. While the handler
@@ -196,11 +198,22 @@ health_rejects_writes() ->
     Write = "{\"key\": \"via_health\", \"value\": \"x\"}",
     {PostStatus, PostHeaders, _} = request_with_headers(post, "/health", Write),
     ?assertEqual(405, PostStatus),
-    ?assertEqual("GET", proplists:get_value("allow", PostHeaders)),
+    ?assertEqual("GET, HEAD", proplists:get_value("allow", PostHeaders)),
     ?assertMatch({405, _}, request(put, "/health", "{\"value\": \"x\"}")),
     ?assertMatch({405, _}, request(delete, "/health")),
     %% and the store is untouched by any of them
     ?assertMatch({404, _}, request(get, "/store/via_health")).
+
+head_mirrors_get() ->
+    %% HEAD used to fall to the method-not-allowed clause, so curl -I and
+    %% any load balancer probing with HEAD saw 405 on resources that
+    %% answered GET. cowboy drops the body for HEAD itself, so the status
+    %% is the whole contract here.
+    ?assertMatch({201, _}, request(post, "/store/head_key", "{\"value\": \"h\"}")),
+    ?assertMatch({200, _}, request(head, "/store/head_key")),
+    ?assertMatch({200, _}, request(head, "/health")),
+    %% and it still reports absence the way GET does
+    ?assertMatch({404, _}, request(head, "/store/head_never_written")).
 
 health_trailing_slash() ->
     %% cowboy normalises /health/ to the same route, so it reaches this
@@ -285,7 +298,9 @@ request(get, Path) ->
 request(delete, Path) ->
     do_request(delete, {base() ++ Path, []});
 request(options, Path) ->
-    do_request(options, {base() ++ Path, []}).
+    do_request(options, {base() ++ Path, []});
+request(head, Path) ->
+    do_request(head, {base() ++ Path, []}).
 
 request(post, Path, Body) ->
     do_request(post, {base() ++ Path, [], "application/json", Body});
