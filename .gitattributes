@@ -1,2 +1,11 @@
 # Hook scripts must keep LF endings or /bin/sh cannot run them under Git Bash.
 .githooks/* text eol=lf
+
+# Build tooling is consumed by POSIX tools inside the container and by
+# MSYS make on the host. CRLF breaks make recipes, leaves stray \r on
+# erl -args_file flags and stops .dockerignore patterns from matching.
+Dockerfile      text eol=lf
+.dockerignore   text eol=lf
+Makefile        text eol=lf
+*.yml           text eol=lf
+config/*        text eol=lf
