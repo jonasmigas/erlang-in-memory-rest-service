@@ -1,0 +1,12 @@
+# Erlang VM flags for the release. `#` starts a comment.
+
+# 127.0.0.1 rather than the container hostname: it always resolves, so the
+# release starts the same way in Docker, in CI and on a workstation.
+-name kv_store@127.0.0.1
+
+# Development cookie. A real deployment should inject its own, e.g. by
+# templating this file or passing -setcookie on the command line.
+-setcookie kv_store
+
+# Crash dumps are noise in a container that gets restarted anyway.
+-env ERL_CRASH_DUMP /dev/null
