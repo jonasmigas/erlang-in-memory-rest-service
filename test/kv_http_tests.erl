@@ -38,7 +38,11 @@ http_test_() ->
       {"the keyless routes still take the key from the body",
        fun keyless_routes_read_the_body/0},
       {"a request with no key at all is a 400", fun no_key_anywhere/0},
-      {"an unsupported method is a 405", fun unsupported_method/0},
+      {"a method the route does not serve is a 405 naming what it does",
+       fun method_not_allowed/0},
+      {"the health route serves no writes", fun health_rejects_writes/0},
+      {"the health route tolerates a trailing slash",
+       fun health_trailing_slash/0},
       {"stopping the listener child stops the listener",
        {timeout, 30, fun listener_restart/0}}
      ]}.
@@ -141,10 +145,38 @@ no_key_anywhere() ->
     ?assertEqual(<<"key_required_in_path">>, maps:get(<<"error">>, PutBody)),
     ?assertMatch({400, _}, request(post, "/store", "{\"value\": \"keyless\"}")).
 
-unsupported_method() ->
-    {Status, Body} = request(options, "/store/anything"),
+method_not_allowed() ->
+    {Status, Headers, Body} = request_with_headers(options, "/store/anything"),
     ?assertEqual(405, Status),
-    ?assertEqual(<<"method_not_allowed">>, maps:get(<<"error">>, Body)).
+    ?assertEqual(<<"method_not_allowed">>, maps:get(<<"error">>, Body)),
+    %% RFC 7231 makes Allow mandatory on a 405. Asserting only the status
+    %% and body would pin its absence as correct.
+    ?assertEqual("GET, POST, PUT, DELETE", proplists:get_value("allow", Headers)).
+
+health_rejects_writes() ->
+    %% /health shares a handler module with /store. While the handler
+    %% decided the resource from the request rather than from the route,
+    %% an absent :key binding read as "the key is in the body" -- so
+    %% POST /health returned 201 and really wrote to the store, and
+    %% PUT/DELETE answered with errors about a key /health has no concept
+    %% of. Every verb but GET must be a 405 that says so.
+    Write = "{\"key\": \"via_health\", \"value\": \"x\"}",
+    {PostStatus, PostHeaders, _} = request_with_headers(post, "/health", Write),
+    ?assertEqual(405, PostStatus),
+    ?assertEqual("GET", proplists:get_value("allow", PostHeaders)),
+    ?assertMatch({405, _}, request(put, "/health", "{\"value\": \"x\"}")),
+    ?assertMatch({405, _}, request(delete, "/health")),
+    %% and the store is untouched by any of them
+    ?assertMatch({404, _}, request(get, "/store/via_health")).
+
+health_trailing_slash() ->
+    %% cowboy normalises /health/ to the same route, so it reaches this
+    %% handler; matching the raw path string missed it and dropped the
+    %% request into the store's GET clause as a 400. A probe URL written
+    %% with a trailing slash would report the service down.
+    {Status, Body} = request(get, "/health/"),
+    ?assertEqual(200, Status),
+    ?assertEqual(<<"ok">>, maps:get(<<"status">>, Body)).
 
 listener_restart() ->
     ?assertMatch({201, _}, request(post, "/store/survivor", "{\"value\": \"alive\"}")),
@@ -222,9 +254,21 @@ request(put, Path, Body) ->
     do_request(put, {base() ++ Path, [], "application/json", Body}).
 
 do_request(Method, Request) ->
-    {ok, {{_Vsn, Status, _Reason}, _Headers, Body}} =
+    {Status, _Headers, Body} = do_request_with_headers(Method, Request),
+    {Status, Body}.
+
+%% Same as request/2,3 but keeps the response headers, for the cases where
+%% the header is the contract being asserted.
+request_with_headers(options, Path) ->
+    do_request_with_headers(options, {base() ++ Path, []}).
+
+request_with_headers(post, Path, Body) ->
+    do_request_with_headers(post, {base() ++ Path, [], "application/json", Body}).
+
+do_request_with_headers(Method, Request) ->
+    {ok, {{_Vsn, Status, _Reason}, Headers, Body}} =
         httpc:request(Method, Request, [], []),
-    {Status, decode(Body)}.
+    {Status, Headers, decode(Body)}.
 
 decode([]) ->
     #{};
