@@ -112,8 +112,20 @@ on 8080; under Docker (`make up`) use 18080.
 `HEAD` is accepted wherever `GET` is, and returns the same status with no
 body.
 
-A write answers `201` only when it created the key; replacing an existing
-one is a `200`, so a client can tell the two apart from the status alone.
+A write answers `201` only when it created the key, and that `201` carries
+a `Location` naming the path the entry now lives at -- percent-encoded, so
+a key with a space or a slash gives a path that resolves. Replacing an
+existing key is a `200` and carries no `Location`.
+
+A key has to survive a round trip: the client reads it out of a response
+and puts it back in a URL. Two kinds cannot, and both are rejected with
+`400` `invalid_key` -- bytes that are not valid UTF-8, which cannot be a
+JSON string at all, and the dot segments `.` and `..`, which the router
+removes before a key is ever seen. An empty key is rejected the same way.
+
+A body that parses but carries no `value` is `400` `missing_value`,
+whether the key came from the path or the body; `invalid_json` means the
+body did not parse.
 
 A method the route does not serve returns `405` with an `Allow` header
 naming the ones it does -- `/health` serves reads only, and will not
