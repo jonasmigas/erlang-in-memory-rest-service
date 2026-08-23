@@ -32,7 +32,8 @@ http_test_() ->
       {"health check answers 200", fun health/0},
       {"store, read back, clear, read again", fun store_get_delete_cycle/0},
       {"a cleared key reads as if never set", fun cleared_matches_never_set/0},
-      {"malformed JSON is a 400, not a crash", fun malformed_json/0}
+      {"malformed JSON is a 400, not a crash", fun malformed_json/0},
+      {"a percent-encoded path key names the same entry", fun percent_encoded_key/0}
      ]}.
 
 setup() ->
@@ -88,6 +89,16 @@ malformed_json() ->
     ?assertMatch({400, _}, request(post, "/store", "{not json")),
     ?assertMatch({400, _}, request(post, "/store/somekey", "")),
     ?assertMatch({400, _}, request(put, "/store/somekey", "<xml/>")).
+
+percent_encoded_key() ->
+    %% Written through the body with a literal space...
+    ?assertMatch({201, _},
+                 request(post, "/store", "{\"key\": \"my key\", \"value\": \"spaced\"}")),
+    %% ...and read back through the path, percent-encoded.
+    {Status, Body} = request(get, "/store/my%20key"),
+    ?assertEqual(200, Status),
+    ?assertEqual(<<"my key">>, maps:get(<<"key">>, Body)),
+    ?assertEqual(<<"spaced">>, maps:get(<<"value">>, Body)).
 
 %% ===================================================================
 %% Helpers

@@ -97,9 +97,9 @@ handle_request(<<"GET">>, <<"/health">>, Req, State) ->
     Response = jsx:encode(#{status => ok, timestamp => os:system_time(second)}),
     {reply(200, Response, Req), State};
 
-handle_request(<<"GET">>, Path, Req, State) ->
+handle_request(<<"GET">>, _Path, Req, State) ->
     %% GET /store/{key}
-    case extract_key(Path) of
+    case extract_key(Req) of
         {ok, Key} ->
             case kv_store:get(Key) of
                 {ok, Key, Value} ->
@@ -124,9 +124,9 @@ handle_request(<<"POST">>, <<"/store">>, Req, State) ->
 handle_request(<<"POST">>, Path, Req, State) when Path =:= <<"/store/">> orelse Path =:= <<"/store/ ">> ->
     handle_post(Req, State);
 
-handle_request(<<"POST">>, Path, Req, State) ->
+handle_request(<<"POST">>, _Path, Req, State) ->
     %% POST /store/{key} with JSON body: {"value": "myvalue"}
-    case extract_key(Path) of
+    case extract_key(Req) of
         {ok, Key} ->
             handle_post_with_key(Key, Req, State);
         {error, missing_key} ->
@@ -134,9 +134,9 @@ handle_request(<<"POST">>, Path, Req, State) ->
             handle_post(Req, State)
     end;
 
-handle_request(<<"PUT">>, Path, Req, State) ->
+handle_request(<<"PUT">>, _Path, Req, State) ->
     %% PUT /store/{key} with JSON body: {"value": "myvalue"}
-    case extract_key(Path) of
+    case extract_key(Req) of
         {ok, Key} ->
             handle_put(Key, Req, State);
         {error, missing_key} ->
@@ -144,9 +144,9 @@ handle_request(<<"PUT">>, Path, Req, State) ->
             {reply(400, Response, Req), State}
     end;
 
-handle_request(<<"DELETE">>, Path, Req, State) ->
+handle_request(<<"DELETE">>, _Path, Req, State) ->
     %% DELETE /store/{key}
-    case extract_key(Path) of
+    case extract_key(Req) of
         {ok, Key} ->
             case kv_store:delete(Key) of
                 ok ->
@@ -241,19 +241,18 @@ handle_put(_Key, Req, State) ->
 %% Helper functions
 %% ===================================================================
 
--spec extract_key(binary()) -> {ok, string()} | {error, missing_key}.
-extract_key(Path) ->
-    %% Path is like <<"/store/mykey">>
-    Parts = binary:split(Path, <<"/">>, [global]),
-    case Parts of
-        [<<"">>, <<"store">>, Key] when byte_size(Key) > 0 ->
-            {ok, binary_to_list(Key)};
-        [<<"">>, <<"store">>, Key, <<"">>] when byte_size(Key) > 0 ->
-            {ok, binary_to_list(Key)};
-        [<<"">>, <<"store">>, <<>>] ->
+-spec extract_key(cowboy_req:req()) -> {ok, string()} | {error, missing_key}.
+extract_key(Req) ->
+    %% cowboy has already percent-decoded the :key binding, so a key
+    %% written as {"key": "my key"} and read back as /store/my%20key
+    %% name the same entry. Splitting the raw path does not.
+    case cowboy_req:binding(key, Req) of
+        undefined ->
             {error, missing_key};
-        _ ->
-            {error, missing_key}
+        <<>> ->
+            {error, missing_key};
+        Key ->
+            {ok, binary_to_list(Key)}
     end.
 
 %% jsx:decode/2 raises on malformed input rather than returning an error,
