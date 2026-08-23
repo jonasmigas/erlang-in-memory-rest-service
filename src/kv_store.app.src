@@ -1,0 +1,14 @@
+{application, kv_store,
+ [{description, "In-memory key-value HTTP REST store"},
+  {vsn, "0.1.0"},
+  {registered, []},
+  {mod, {kv_store_app, []}},
+  {applications,
+   [kernel,
+    stdlib,
+    cowboy,
+    jsx
+   ]},
+  {env, []},
+  {modules, []}
+ ]}.
