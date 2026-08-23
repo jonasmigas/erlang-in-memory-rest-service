@@ -10,7 +10,6 @@
 %% Cowboy handler
 -export([init/2, terminate/3]).
 
--define(DEFAULT_PORT, 8080).
 -define(MAX_BODY_SIZE, 1048576).  %% 1MB
 -define(READ_PERIOD, 5000).       %% per chunk
 -define(BODY_DEADLINE, 15000).    %% for the whole body
@@ -45,11 +44,18 @@ child_spec() ->
     },
     ranch:child_spec(?MODULE, ranch_tcp, TransOpts, cowboy_clear, ProtoOpts).
 
-%% The listen port, overridable so a deployment (or a test) can pick one
-%% that is free. Docker maps the container's port to 18080 on the host.
+%% The listen port. The default lives in kv_store.app.src, so this
+%% carries no literal of its own to drift from it; sys.config, a
+%% -kv_store port flag or application:set_env/3 override it, which is
+%% how a deployment picks a port and how the tests pick a free one.
+%%
+%% Matching rather than defaulting is deliberate: child_spec/0 only runs
+%% under a started kv_store, so an unset port means the application is
+%% broken, and failing there says so instead of quietly binding 8080.
 -spec port() -> inet:port_number().
 port() ->
-    application:get_env(kv_store, port, ?DEFAULT_PORT).
+    {ok, Port} = application:get_env(kv_store, port),
+    Port.
 
 %% ===================================================================
 %% Routing
