@@ -1,6 +1,10 @@
 %%%-------------------------------------------------------------------
 %%% @doc In-memory key-value store backed by a GenServer.
 %%%-------------------------------------------------------------------
+%%% Keys are binaries throughout. They arrive from cowboy as binaries
+%%% and leave through jsx as binaries, so converting to a list in
+%%% between only cost work and gave the two representations a chance to
+%%% disagree.
 -module(kv_store).
 -behaviour(gen_server).
 -compile({no_auto_import, [get/1]}).
@@ -26,20 +30,20 @@ start_link() ->
 %% Reports whether the key was created or overwritten, so the HTTP layer
 %% can answer 201 or 200 without a read-then-write across two calls --
 %% which would race, and defeat the point of serialising here.
--spec set(string(), any()) -> {ok, created | updated} | {error, invalid_key}.
-set("", _Value) ->
+-spec set(binary(), any()) -> {ok, created | updated} | {error, invalid_key}.
+set(<<>>, _Value) ->
     {error, invalid_key};
 set(Key, Value) ->
     gen_server:call(?MODULE, {set, Key, Value}, call_timeout()).
 
--spec get(string()) -> {ok, string(), any()} | {error, not_found} | {error, invalid_key}.
-get("") ->
+-spec get(binary()) -> {ok, binary(), any()} | {error, not_found} | {error, invalid_key}.
+get(<<>>) ->
     {error, invalid_key};
 get(Key) ->
     gen_server:call(?MODULE, {get, Key}, call_timeout()).
 
--spec delete(string()) -> ok | {error, not_found} | {error, invalid_key}.
-delete("") ->
+-spec delete(binary()) -> ok | {error, not_found} | {error, invalid_key}.
+delete(<<>>) ->
     {error, invalid_key};
 delete(Key) ->
     gen_server:call(?MODULE, {delete, Key}, call_timeout()).

@@ -108,10 +108,10 @@ handle_request(store, <<"GET">>, Req) ->
     with_key(Req, fun(Key) ->
         case call_store(fun() -> kv_store:get(Key) end) of
             {ok, Key, Value} ->
-                reply(200, #{key => list_to_binary(Key), value => Value}, Req);
+                reply(200, #{key => Key, value => Value}, Req);
             {error, not_found} ->
                 reply(404, #{error => <<"key_not_found">>,
-                             key => list_to_binary(Key)}, Req);
+                             key => Key}, Req);
             {error, invalid_key} ->
                 reply(400, #{error => <<"invalid_key">>}, Req);
             {error, unavailable} ->
@@ -144,7 +144,7 @@ handle_request(store, <<"DELETE">>, Req) ->
                 reply(204, Req);
             {error, not_found} ->
                 reply(404, #{error => <<"key_not_found">>,
-                             key => list_to_binary(Key)}, Req);
+                             key => Key}, Req);
             {error, invalid_key} ->
                 reply(400, #{error => <<"invalid_key">>}, Req);
             {error, unavailable} ->
@@ -201,7 +201,7 @@ write(Key, Value, Req) ->
         false ->
             reply(400, #{error => <<"invalid_key">>}, Req);
         true ->
-            case call_store(fun() -> kv_store:set(binary_to_list(Key), Value) end) of
+            case call_store(fun() -> kv_store:set(Key, Value) end) of
                 {ok, Outcome} ->
                     stored(Outcome, Key,
                            #{key => Key, value => Value,
@@ -234,7 +234,7 @@ store_from_body(Req) ->
 store_with_key(Key, Req) ->
     with_json_body(Req, <<"Expected {\"value\":\"...\"}">>,
         fun(#{<<"value">> := Value}, Req2) ->
-                write(list_to_binary(Key), Value, Req2);
+                write(Key, Value, Req2);
            (_, Req2) ->
                 reply(400, #{error => <<"missing_value">>}, Req2)
         end).
@@ -277,7 +277,7 @@ unavailable(Req) ->
     reply(503, #{error => <<"store_unavailable">>}, Req).
 
 %% Run Fun with the path key, or answer 400 when the route carried none.
--spec with_key(cowboy_req:req(), fun((string()) -> cowboy_req:req())) ->
+-spec with_key(cowboy_req:req(), fun((binary()) -> cowboy_req:req())) ->
     cowboy_req:req().
 with_key(Req, Fun) ->
     case extract_key(Req) of
@@ -286,7 +286,8 @@ with_key(Req, Fun) ->
         {error, invalid_key} -> reply(400, #{error => <<"invalid_key">>}, Req)
     end.
 
--spec extract_key(cowboy_req:req()) -> {ok, string()} | {error, missing_key}.
+-spec extract_key(cowboy_req:req()) ->
+    {ok, binary()} | {error, missing_key | invalid_key}.
 extract_key(Req) ->
     %% The :key binding is already percent-decoded by cowboy, so a key
     %% written as {"key": "my key"} and read back as /store/my%20key
@@ -296,7 +297,7 @@ extract_key(Req) ->
             {error, missing_key};
         Key ->
             case valid_key(Key) of
-                true -> {ok, binary_to_list(Key)};
+                true -> {ok, Key};
                 false -> {error, invalid_key}
             end
     end.
