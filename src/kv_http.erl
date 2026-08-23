@@ -8,7 +8,7 @@
 %% Application callbacks
 -export([start/0, start/2, stop/0, stop/1]).
 %% Supervisor child API
--export([start_link/0]).
+-export([child_spec/0]).
 %% Cowboy handler
 -export([init/2, terminate/3]).
 
@@ -19,15 +19,32 @@
 %% Supervisor child API
 %% ===================================================================
 
-%% Wraps the cowboy listener in a dedicated linked process so it has its
-%% own pid for the supervisor to track (cowboy manages its own workers).
--spec start_link() -> {ok, pid()} | {error, any()}.
-start_link() ->
-    Pid = spawn_link(fun() ->
-        start_http_server(),
-        receive stop -> ok end
-    end),
-    {ok, Pid}.
+%% Child spec for the cowboy listener.
+%%
+%% cowboy:start_clear/3 starts the listener under ranch's own supervisor,
+%% which leaves this application's tree owning nothing: a restart would
+%% call it again under the same name, get {error, {already_started, _}},
+%% and crash-loop past the supervisor's restart intensity -- taking
+%% kv_store and every stored key down with it. Embedding ranch's child
+%% spec puts the listener in our tree instead, so a restart really does
+%% restart it, and application:stop/1 tears it down.
+-spec child_spec() -> supervisor:child_spec().
+child_spec() ->
+    TransOpts = #{
+        socket_opts => [{port, port()}],
+        connection_type => supervisor
+    },
+    ProtoOpts = #{
+        env => #{dispatch => dispatch()},
+        connection_type => supervisor
+    },
+    ranch:child_spec(?MODULE, ranch_tcp, TransOpts, cowboy_clear, ProtoOpts).
+
+%% The listen port, overridable so a deployment (or a test) can pick one
+%% that is free. Docker maps the container's port to 18080 on the host.
+-spec port() -> inet:port_number().
+port() ->
+    application:get_env(kv_store, port, ?DEFAULT_PORT).
 
 %% ===================================================================
 %% Application callbacks (for running as a child)
@@ -53,26 +70,20 @@ stop(_State) ->
 %% Internal: Start Cowboy
 %% ===================================================================
 
-%% The listen port, overridable so a deployment (or a test) can pick one
-%% that is free. Docker maps the container's port to 18080 on the host.
--spec port() -> inet:port_number().
-port() ->
-    application:get_env(kv_store, port, ?DEFAULT_PORT).
-
-start_http_server() ->
-    %% Create the dispatch routes
-    Dispatch = cowboy_router:compile([
+-spec dispatch() -> cowboy_router:dispatch_rules().
+dispatch() ->
+    cowboy_router:compile([
         {'_', [
             {"/store/[:key]", ?MODULE, []},      %% GET, POST, PUT, DELETE
             {"/store", ?MODULE, []},             %% POST (alternative)
             {"/health", ?MODULE, []}             %% Health check
         ]}
-    ]),
+    ]).
 
-    %% Start the cowboy listener
+start_http_server() ->
     {ok, _Pid} = cowboy:start_clear(?MODULE,
         [{port, port()}],
-        #{env => #{dispatch => Dispatch}}
+        #{env => #{dispatch => dispatch()}}
     ),
     io:format("~n~s HTTP Server started on port ~p~n", [?MODULE, port()]),
     {ok, self()}.
@@ -243,9 +254,9 @@ handle_put(_Key, Req, State) ->
 
 -spec extract_key(cowboy_req:req()) -> {ok, string()} | {error, missing_key}.
 extract_key(Req) ->
-    %% cowboy has already percent-decoded the :key binding, so a key
+    %% The :key binding is already percent-decoded by cowboy, so a key
     %% written as {"key": "my key"} and read back as /store/my%20key
-    %% name the same entry. Splitting the raw path does not.
+    %% resolve to the same entry. Splitting the raw path does not.
     case cowboy_req:binding(key, Req) of
         undefined ->
             {error, missing_key};

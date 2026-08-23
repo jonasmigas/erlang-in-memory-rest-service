@@ -33,7 +33,9 @@ http_test_() ->
       {"store, read back, clear, read again", fun store_get_delete_cycle/0},
       {"a cleared key reads as if never set", fun cleared_matches_never_set/0},
       {"malformed JSON is a 400, not a crash", fun malformed_json/0},
-      {"a percent-encoded path key names the same entry", fun percent_encoded_key/0}
+      {"a percent-encoded path key names the same entry", fun percent_encoded_key/0},
+      {"stopping the listener child stops the listener",
+       {timeout, 30, fun listener_restart/0}}
      ]}.
 
 setup() ->
@@ -100,9 +102,34 @@ percent_encoded_key() ->
     ?assertEqual(<<"my key">>, maps:get(<<"key">>, Body)),
     ?assertEqual(<<"spaced">>, maps:get(<<"value">>, Body)).
 
+listener_restart() ->
+    ?assertMatch({201, _}, request(post, "/store/survivor", "{\"value\": \"alive\"}")),
+    StorePid = whereis(kv_store),
+    Id = http_child_id(),
+    %% The listener used to run under ranch's own supervisor, so this tree
+    %% owned nothing: terminating the child left the listener serving, and
+    %% restarting it re-ran cowboy:start_clear/3 under the same name, got
+    %% {error, {already_started, _}} and badmatched into a crash loop.
+    %% Stopping the child must therefore actually stop the listener.
+    ok = supervisor:terminate_child(kv_store_sup, Id),
+    ?assertEqual(down, wait_for_listener(down, 40)),
+    ?assertMatch({ok, _}, supervisor:restart_child(kv_store_sup, Id)),
+    ?assertEqual(up, wait_for_listener(up, 40)),
+    %% one_for_one: the store must not have gone down with the listener,
+    %% and the data it holds must have survived.
+    ?assertEqual(StorePid, whereis(kv_store)),
+    {Status, Body} = request(get, "/store/survivor"),
+    ?assertEqual(200, Status),
+    ?assertEqual(<<"alive">>, maps:get(<<"value">>, Body)).
+
 %% ===================================================================
 %% Helpers
 %% ===================================================================
+
+http_child_id() ->
+    Children = supervisor:which_children(kv_store_sup),
+    [Id | _] = [I || {I, _, _, _} <- Children, I =/= kv_store],
+    Id.
 
 stop_stray_store() ->
     case whereis(kv_store) of

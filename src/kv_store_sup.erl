@@ -33,15 +33,9 @@ init([]) ->
         modules => [kv_store]
     },
 
-    %% Child 2: The HTTP server (cowboy)
-    HttpChild = #{
-        id => kv_http,
-        start => {kv_http, start_link, []},
-        restart => permanent,
-        shutdown => 5000,
-        type => worker,
-        modules => [kv_http]
-    },
+    %% Child 2: the cowboy listener. kv_http:child_spec/0 returns ranch's
+    %% own spec so the listener is supervised here rather than by ranch_sup.
+    HttpChild = kv_http:child_spec(),
 
     Children = [StoreChild, HttpChild],
 
