@@ -12,6 +12,8 @@
 
 -define(DEFAULT_PORT, 8080).
 -define(MAX_BODY_SIZE, 1048576).  %% 1MB
+-define(READ_PERIOD, 5000).       %% per chunk
+-define(BODY_DEADLINE, 15000).    %% for the whole body
 
 -define(STORE_METHODS, [<<"GET">>, <<"HEAD">>, <<"POST">>, <<"PUT">>, <<"DELETE">>]).
 -define(HEALTH_METHODS, [<<"GET">>, <<"HEAD">>]).
@@ -180,7 +182,11 @@ store_from_body(Req) ->
                                  message => <<"Expected {\"key\":\"...\", \"value\":\"...\"}">>}, Req2)
             end;
         {error, too_large} ->
-            reply(413, #{error => <<"request_too_large">>}, Req)
+            reply(413, #{error => <<"request_too_large">>}, Req);
+        {error, timeout} ->
+            reply(408, #{error => <<"request_timeout">>}, Req);
+        {error, bad_request} ->
+            reply(400, #{error => <<"bad_request">>}, Req)
     end.
 
 %% The key came from the path, so the body carries only {"value": ...}.
@@ -206,7 +212,11 @@ store_with_key(Key, Req) ->
                                  message => <<"Expected {\"value\":\"...\"}">>}, Req2)
             end;
         {error, too_large} ->
-            reply(413, #{error => <<"request_too_large">>}, Req)
+            reply(413, #{error => <<"request_too_large">>}, Req);
+        {error, timeout} ->
+            reply(408, #{error => <<"request_timeout">>}, Req);
+        {error, bad_request} ->
+            reply(400, #{error => <<"bad_request">>}, Req)
     end.
 
 %% ===================================================================
@@ -265,16 +275,49 @@ decode_json(Body) ->
         _:_ -> {error, invalid_json}
     end.
 
+%% cowboy_req:read_body/2 answers {more, ...} for two different reasons:
+%% the length it was asked for is available, or the read period expired
+%% with the body still incomplete. Matching only {ok, ...} and calling
+%% every other outcome too_large told a client on a slow link that its
+%% 19-byte body was over the 1MB cap, and dropped the write. Accumulate
+%% instead, and separate "over the cap" from "ran out of time".
 -spec read_body(cowboy_req:req()) ->
-    {ok, binary(), cowboy_req:req()} | {error, too_large}.
+    {ok, binary(), cowboy_req:req()} | {error, too_large | timeout | bad_request}.
 read_body(Req) ->
-    try
-        {ok, Body, Req2} = cowboy_req:read_body(Req, #{length => ?MAX_BODY_SIZE}),
-        {ok, Body, Req2}
-    catch
-        _:_ ->
-            {error, too_large}
+    read_body(Req, <<>>, erlang:monotonic_time(millisecond) + body_deadline()).
+
+read_body(Req, Acc, Deadline) ->
+    case Deadline - erlang:monotonic_time(millisecond) of
+        Left when Left =< 0 ->
+            {error, timeout};
+        Left ->
+            Opts = #{length => ?MAX_BODY_SIZE, period => min(Left, ?READ_PERIOD)},
+            try cowboy_req:read_body(Req, Opts) of
+                {ok, Data, Req2} ->
+                    Body = <<Acc/binary, Data/binary>>,
+                    case byte_size(Body) > ?MAX_BODY_SIZE of
+                        true -> {error, too_large};
+                        false -> {ok, Body, Req2}
+                    end;
+                {more, Data, Req2} ->
+                    Body = <<Acc/binary, Data/binary>>,
+                    case byte_size(Body) >= ?MAX_BODY_SIZE of
+                        true -> {error, too_large};
+                        false -> read_body(Req2, Body, Deadline)
+                    end
+            catch
+                %% cowboy exits with timeout of its own once the period
+                %% is well past; anything else is a broken request.
+                exit:_ -> {error, timeout};
+                _:_ -> {error, bad_request}
+            end
     end.
+
+%% How long a whole body may take to arrive. Overridable so a deployment
+%% behind a slow link can raise it, and so the test does not have to
+%% spend the default waiting.
+body_deadline() ->
+    application:get_env(kv_store, body_deadline, ?BODY_DEADLINE).
 
 -spec reply(integer(), cowboy_req:req()) -> cowboy_req:req().
 reply(StatusCode, Req) ->

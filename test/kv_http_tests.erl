@@ -16,6 +16,10 @@ base() ->
     {ok, Port} = application:get_env(kv_store, port),
     "http://127.0.0.1:" ++ integer_to_list(Port).
 
+listen_port() ->
+    {ok, Port} = application:get_env(kv_store, port),
+    Port.
+
 free_port() ->
     {ok, Sock} = gen_tcp:listen(0, [{ip, {127, 0, 0, 1}}]),
     {ok, Port} = inet:port(Sock),
@@ -69,6 +73,9 @@ http_test_() ->
        fun overwrite_is_not_created/0},
       {"an unreachable store is a 503, not a bodiless 500",
        {timeout, 30, fun store_unavailable/0}},
+      {"a body that never arrives is a 408, not a 413",
+       {timeout, 30, fun slow_body_is_a_timeout/0}},
+      {"a body over the cap is still a 413", {timeout, 30, fun oversized_body/0}},
       {"stopping the listener child stops the listener",
        {timeout, 30, fun listener_restart/0}}
      ]}.
@@ -273,6 +280,46 @@ store_unavailable() ->
     %% recovery on a fresh key rather than on that one.
     ?assertMatch({201, _}, request(put, "/store/after_thaw", "{\"value\": \"t\"}")),
     ?assertMatch({200, #{<<"value">> := <<"t">>}}, request(get, "/store/after_thaw")).
+
+slow_body_is_a_timeout() ->
+    %% read_body/1 matched only {ok, ...} and called everything else
+    %% too_large, but cowboy also answers {more, ...} when the read
+    %% period expires. A client that stalled mid-body was told its
+    %% handful of bytes exceeded 1MB, and the write was dropped.
+    ok = application:set_env(kv_store, body_deadline, 400),
+    try
+        {ok, Sock} = gen_tcp:connect({127, 0, 0, 1}, listen_port(),
+                                     [binary, {active, false}, {packet, raw}]),
+        %% headers promise 20 bytes; none of them ever follow
+        ok = gen_tcp:send(Sock,
+             "POST /store/slowbody HTTP/1.1
+"
+             "Host: 127.0.0.1
+"
+             "Content-Type: application/json
+"
+             "Content-Length: 20
+"
+             "Connection: close
+
+"),
+        {ok, Resp} = gen_tcp:recv(Sock, 0, 10000),
+        gen_tcp:close(Sock),
+        ?assertMatch({match, _}, re:run(Resp, "^HTTP/1\.1 408 ")),
+        ?assertMatch({match, _}, re:run(Resp, "request_timeout"))
+    after
+        ok = application:set_env(kv_store, body_deadline, 15000)
+    end,
+    %% and nothing was written under that key
+    ?assertMatch({404, _}, request(get, "/store/slowbody")).
+
+oversized_body() ->
+    %% The cap itself still holds, and still reports as a size problem.
+    Big = binary:copy(<<"x">>, 1048600),
+    Body = <<"{\"value\": \"", Big/binary, "\"}">>,
+    ?assertMatch({413, #{<<"error">> := <<"request_too_large">>}},
+                 request(put, "/store/toobig", binary_to_list(Body))),
+    ?assertMatch({404, _}, request(get, "/store/toobig")).
 
 head_mirrors_get() ->
     %% HEAD used to fall to the method-not-allowed clause, so curl -I and
