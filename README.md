@@ -42,3 +42,28 @@ rebar3 shell
 ```
 
 The API is now available at `http://localhost:8080`.
+
+## Development
+
+### Running the tests
+
+```bash
+rebar3 eunit
+```
+
+### Commit hooks
+
+Commit conventions are enforced by git hooks in `.githooks/`. Git does not
+enable a repo's hooks automatically, so turn them on once per clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+- `commit-msg` **rejects** a message that does not follow
+  `type(scope): title`, a blank line, then a description body. The title
+  must be lowercase and imperative with no trailing period; subjects over
+  72 characters are rejected and over 50 are warned about.
+- `pre-commit` **warns** when files under `src/` are staged without any
+  file under `test/`, as a reminder that behaviour changes belong with
+  their tests.
