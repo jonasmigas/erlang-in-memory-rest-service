@@ -78,6 +78,8 @@ http_test_() ->
       {"a body over the cap is still a 413", {timeout, 30, fun oversized_body/0}},
       {"a key that cannot round-trip is rejected", fun unusable_keys/0},
       {"a created resource says where it went", fun created_has_location/0},
+      {"a body with no value says so, either way",
+       fun missing_value_agrees/0},
       {"stopping the listener child stops the listener",
        {timeout, 30, fun listener_restart/0}}
      ]}.
@@ -358,6 +360,17 @@ created_has_location() ->
         request_with_headers(post, "/store", "{\"key\": \"loc key\", \"value\": \"w\"}"),
     ?assertEqual(200, Again),
     ?assertEqual(undefined, proplists:get_value("location", AgainHeaders)).
+
+missing_value_agrees() ->
+    %% Same mistake, same answer, whichever form carried the key. The
+    %% path form used to call this valid JSON invalid.
+    ?assertMatch({400, #{<<"error">> := <<"missing_value">>}},
+                 request(post, "/store", "{\"key\": \"novalue\"}")),
+    ?assertMatch({400, #{<<"error">> := <<"missing_value">>}},
+                 request(put, "/store/novalue", "{}")),
+    %% and genuinely malformed JSON still reports as malformed
+    ?assertMatch({400, #{<<"error">> := <<"invalid_json">>}},
+                 request(put, "/store/novalue", "{not json")).
 
 head_mirrors_get() ->
     %% HEAD used to fall to the method-not-allowed clause, so curl -I and

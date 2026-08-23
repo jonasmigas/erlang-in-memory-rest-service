@@ -167,7 +167,8 @@ store_from_body(Req) ->
                 {ok, #{<<"key">> := Key, <<"value">> := Value}} when is_binary(Key) ->
                     store_body_key(Key, Value, Req2);
                 {ok, #{<<"key">> := Key}} when is_binary(Key) ->
-                    %% Missing value
+                    %% Valid JSON, key present, value absent -- say that,
+                    %% rather than blaming the JSON.
                     reply(400, #{error => <<"missing_value">>}, Req2);
                 _ ->
                     reply(400, #{error => <<"invalid_json">>,
@@ -219,6 +220,11 @@ store_with_key(Key, Req) ->
                         {error, unavailable} ->
                             unavailable(Req2)
                     end;
+                {ok, Decoded} when is_map(Decoded) ->
+                    %% The JSON parsed; it just had no value in it. The
+                    %% body form already said missing_value here, and the
+                    %% two disagreeing is what made the error useless.
+                    reply(400, #{error => <<"missing_value">>}, Req2);
                 _ ->
                     reply(400, #{error => <<"invalid_json">>,
                                  message => <<"Expected {\"value\":\"...\"}">>}, Req2)
@@ -310,8 +316,6 @@ valid_key(<<"..">>) -> false;
 valid_key(Key) ->
     is_binary(unicode:characters_to_binary(Key, utf8, utf8)).
 
-%% jsx:decode/2 raises on malformed input rather than returning an error,
-%% so every call has to be guarded or the handler crashes into a 500.
 %% jsx:decode/2 raises on malformed input rather than returning an error,
 %% so every call has to be guarded or the handler crashes into a 500.
 -spec decode_json(binary()) -> {ok, jsx:json_term()} | {error, invalid_json}.
