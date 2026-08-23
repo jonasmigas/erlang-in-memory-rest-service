@@ -57,7 +57,7 @@ start_http_server() ->
     %% Create the dispatch routes
     Dispatch = cowboy_router:compile([
         {'_', [
-            {"/store/[:key]", ?MODULE, []},      %% GET, POST, DELETE
+            {"/store/[:key]", ?MODULE, []},      %% GET, POST, PUT, DELETE
             {"/store", ?MODULE, []},             %% POST (alternative)
             {"/health", ?MODULE, []}             %% Health check
         ]}
