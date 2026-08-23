@@ -160,19 +160,26 @@ handle_request(store, _Method, Req) ->
 %% ===================================================================
 
 %% The key comes from the body: {"key": "mykey", "value": "myvalue"}.
-store_from_body(Req) ->
+%% Owns the body read and every way it can fail, so the two write paths
+%% cannot disagree about how a slow, oversized or unparseable body is
+%% reported. They had already drifted once: one grew a missing-value
+%% answer and the other kept calling that body malformed.
+%%
+%% Fun sees a decoded JSON object and returns the response. Anything
+%% that is not an object -- an array, a bare string, a parse failure --
+%% never reaches it and is answered with Expected.
+-spec with_json_body(cowboy_req:req(), binary(),
+                     fun((map(), cowboy_req:req()) -> cowboy_req:req())) ->
+    cowboy_req:req().
+with_json_body(Req, Expected, Fun) ->
     case read_body(Req) of
         {ok, Body, Req2} ->
             case decode_json(Body) of
-                {ok, #{<<"key">> := Key, <<"value">> := Value}} when is_binary(Key) ->
-                    store_body_key(Key, Value, Req2);
-                {ok, #{<<"key">> := Key}} when is_binary(Key) ->
-                    %% Valid JSON, key present, value absent -- say that,
-                    %% rather than blaming the JSON.
-                    reply(400, #{error => <<"missing_value">>}, Req2);
+                {ok, Decoded} when is_map(Decoded) ->
+                    Fun(Decoded, Req2);
                 _ ->
                     reply(400, #{error => <<"invalid_json">>,
-                                 message => <<"Expected {\"key\":\"...\", \"value\":\"...\"}">>}, Req2)
+                                 message => Expected}, Req2)
             end;
         {error, too_large} ->
             reply(413, #{error => <<"request_too_large">>}, Req);
@@ -182,10 +189,14 @@ store_from_body(Req) ->
             reply(400, #{error => <<"bad_request">>}, Req)
     end.
 
-%% A key out of the body faces the same round-trip rule as one out of
-%% the path -- the client will read it back from the response and put it
-%% in a URL either way.
-store_body_key(Key, Value, Req) ->
+%% The one place a key and a value become a stored entry and a response,
+%% whichever form the request used to carry them.
+%%
+%% valid_key/1 runs here even for a path key that extract_key/1 already
+%% checked: the rule belongs to writing, not to one route, and paying a
+%% second cheap check is better than a second place to forget it.
+-spec write(binary(), any(), cowboy_req:req()) -> cowboy_req:req().
+write(Key, Value, Req) ->
     case valid_key(Key) of
         false ->
             reply(400, #{error => <<"invalid_key">>}, Req);
@@ -202,40 +213,31 @@ store_body_key(Key, Value, Req) ->
             end
     end.
 
+%% The key comes from the body: {"key": "mykey", "value": "myvalue"}.
+store_from_body(Req) ->
+    Expected = <<"Expected {\"key\":\"...\", \"value\":\"...\"}">>,
+    with_json_body(Req, Expected,
+        fun(#{<<"key">> := Key, <<"value">> := Value}, Req2) when is_binary(Key) ->
+                write(Key, Value, Req2);
+           (#{<<"key">> := Key}, Req2) when is_binary(Key) ->
+                %% Valid JSON, key present, value absent -- say that,
+                %% rather than blaming the JSON.
+                reply(400, #{error => <<"missing_value">>}, Req2);
+           (_, Req2) ->
+                %% An object, but not one this route can read: no key, or
+                %% a key that is not a string.
+                reply(400, #{error => <<"invalid_json">>,
+                             message => Expected}, Req2)
+        end).
+
 %% The key came from the path, so the body carries only {"value": ...}.
-%% extract_key/1 has already rejected anything unusable, so there is no
-%% empty-key or invalid-key clause here.
 store_with_key(Key, Req) ->
-    case read_body(Req) of
-        {ok, Body, Req2} ->
-            case decode_json(Body) of
-                {ok, #{<<"value">> := Value}} ->
-                    case call_store(fun() -> kv_store:set(Key, Value) end) of
-                        {ok, Outcome} ->
-                            stored(Outcome, list_to_binary(Key),
-                                   #{key => list_to_binary(Key), value => Value,
-                                     status => <<"stored">>}, Req2);
-                        {error, invalid_key} ->
-                            reply(400, #{error => <<"invalid_key">>}, Req2);
-                        {error, unavailable} ->
-                            unavailable(Req2)
-                    end;
-                {ok, Decoded} when is_map(Decoded) ->
-                    %% The JSON parsed; it just had no value in it. The
-                    %% body form already said missing_value here, and the
-                    %% two disagreeing is what made the error useless.
-                    reply(400, #{error => <<"missing_value">>}, Req2);
-                _ ->
-                    reply(400, #{error => <<"invalid_json">>,
-                                 message => <<"Expected {\"value\":\"...\"}">>}, Req2)
-            end;
-        {error, too_large} ->
-            reply(413, #{error => <<"request_too_large">>}, Req);
-        {error, timeout} ->
-            reply(408, #{error => <<"request_timeout">>}, Req);
-        {error, bad_request} ->
-            reply(400, #{error => <<"bad_request">>}, Req)
-    end.
+    with_json_body(Req, <<"Expected {\"value\":\"...\"}">>,
+        fun(#{<<"value">> := Value}, Req2) ->
+                write(list_to_binary(Key), Value, Req2);
+           (_, Req2) ->
+                reply(400, #{error => <<"missing_value">>}, Req2)
+        end).
 
 %% ===================================================================
 %% Helper functions
