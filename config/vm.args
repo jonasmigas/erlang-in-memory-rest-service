@@ -1,0 +1,21 @@
+# Erlang VM flags for the release. `#` starts a comment.
+
+# The relx start script refuses to boot without exactly one of -name/-sname,
+# so distribution cannot simply be left off. 127.0.0.1 always resolves, so the
+# release starts the same way in Docker, in CI and on a workstation.
+-name kv_store@127.0.0.1
+
+# Confine the distribution listener to loopback. By default it binds every
+# interface, which would let any peer that can reach the container network
+# attempt a handshake. Nothing here uses rpc, net_kernel or global, so the
+# listener exists only to satisfy the start script.
+-kernel inet_dist_use_interface {127,0,0,1}
+
+# No -setcookie: with none given the VM generates a random cookie in
+# $HOME/.erlang.cookie at first boot. A literal here would be a shared secret
+# committed to the repository and baked into every published image.
+
+# Skip crash dump generation rather than only redirecting it. Setting
+# ERL_CRASH_DUMP alone still walks every process and formats the whole dump
+# before writing it, which just delays the restart.
+-env ERL_CRASH_DUMP_SECONDS 0

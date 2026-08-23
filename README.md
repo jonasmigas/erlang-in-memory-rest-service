@@ -13,40 +13,92 @@ A simple in-memory key-value store with a REST API, built in Erlang using OTP an
 
 ## Requirements
 
-- Docker and Docker Compose (recommended — no local Erlang install needed)
-- Or, to run without Docker: Erlang/OTP 22+ and Rebar3
+- Docker, and Docker Compose v2 (the `docker compose` subcommand; the file
+  omits the obsolete `version:` key, which Compose v1 cannot parse).
+  Everything below runs inside a container, so no local Erlang/OTP or rebar3
+  install is needed.
+- `make` is optional but assumed by the commands below; each target is a
+  one-line docker command you can run directly instead.
 
-## Quick Start (Docker)
-
-```bash
-docker-compose up --build
-```
-
-The API is available at `http://localhost:18080` (mapped to port 8080 inside the container).
-
-## Quick Start (without Docker)
+## Quick start
 
 ```bash
-# Clone the repository
-git clone <your-repo-url>
-cd kv_store
-
-# Compile
-rebar3 compile
-
-# Run tests
-rebar3 eunit
-
-# Start the application (this also starts the HTTP server automatically)
-rebar3 shell
+make up        # build and start the service in the background
+make health    # confirm it answers
+make down      # stop it
 ```
 
-The API is now available at `http://localhost:8080`.
+The API is available at `http://localhost:18080` (mapped to 8080 inside the
+container).
+
+`make` on its own lists every target:
+
+| Target | What it does |
+|--------|--------------|
+| `make build` | Build the dev image |
+| `make test` | Run the EUnit suite |
+| `make shell` | Open a `rebar3 shell` with the app started (no published port, so it works alongside `make up`) |
+| `make up` / `make down` | Start the service and wait until it is healthy / stop it |
+| `make logs` | Follow the service logs |
+| `make health` | Ask the running service for `/health` |
+| `make release` | Build the production release image, then smoke-test it |
+| `make smoke` | Boot that image and check it serves `/health` |
+| `make release-run` | Run that image in the foreground |
+| `make clean` | Stop everything, drop images and cached builds |
+
+`src/`, `test/` and `config/` are bind-mounted into the dev container, so an
+edit is picked up by the next `make test` or `make shell` without rebuilding.
+`_build` lives in a named volume so compiled dependencies survive between
+runs -- run `make clean` after changing `rebar.config` to drop stale ones.
+
+## Deployment
+
+`rebar3` builds a relx release, not just a shell target:
+
+```bash
+make release      # builds the runtime image, then boots it and checks /health
+make release-run  # runs it on http://localhost:18080
+```
+
+The runtime image is the release and nothing else -- no rebar3, no compiler,
+no sources -- running as a non-root user with a `HEALTHCHECK` on `/health`.
+It is roughly 22 MB against roughly 81 MB for the dev image.
+
+Erlang distribution is confined to loopback and the node cookie is generated
+per container at first boot, so the release exposes only the HTTP port.
+
+`make release` finishes by booting the image and asking it for `/health`. The
+runtime stage runs an ERTS compiled against a different base image than it
+ships on, so a library skew between the two would otherwise build cleanly and
+fail only at startup -- the one failure nothing else here exercises.
+
+To build a release outside Docker, with Erlang/OTP 26 and rebar3 on the host:
+
+```bash
+rebar3 as prod release  # _build/prod/rel/kv_store, ERTS included
+rebar3 as prod tar      # the same tree, packaged as a tarball
+rebar3 release          # development release under _build/default/rel
+rebar3 shell            # REPL with the app started, on port 8080
+```
+
+VM flags are in `config/vm.args`. The listen port defaults to
+`config/sys.config`, but the runtime image passes `-kv_store port $APP_PORT`,
+so `APP_PORT` drives the bind, the `EXPOSE` and the health probe together:
+
+```bash
+docker run --rm -e APP_PORT=9099 -p 9099:9099 kv_store:latest
+```
+
+On the host side, `HOST_PORT` sets the published port for every make target:
+
+```bash
+make up HOST_PORT=19090
+```
 
 ## API
 
 All requests and responses are JSON. Ports below assume the non-Docker run
-on 8080; with `docker-compose` use 18080.
+on 8080; under Docker (`make up`) use 18080.
 
 | Method | Endpoint | Request body | Success | Errors |
 |--------|----------|--------------|---------|--------|
@@ -88,8 +140,11 @@ curl -i http://localhost:8080/store/user_123
 ### Running the tests
 
 ```bash
-rebar3 eunit
+make test
 ```
+
+Equivalent to `docker compose run --rm kv_store rebar3 eunit`, or plain
+`rebar3 eunit` if you have rebar3 on the host.
 
 ### Commit hooks
 

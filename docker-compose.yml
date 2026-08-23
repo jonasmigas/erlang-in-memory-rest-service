@@ -1,12 +1,34 @@
-version: '3.8'
+# `version:` is omitted deliberately: Compose v2 ignores it and warns that the
+# attribute is obsolete. This file needs Compose v2.
 
 services:
   kv_store:
-    build: .
+    build:
+      context: .
+      target: dev
+    # HOST_PORT is exported by the Makefile, so `make up HOST_PORT=19090`
+    # changes the published port as well as the banner and the health probe.
     ports:
-      - "18080:8080"
+      - "${HOST_PORT:-18080}:8080"
     environment:
       - ERL_AFLAGS=-kernel shell_history enabled
     volumes:
+      # Sources are bind-mounted so an edit is picked up by the next
+      # `rebar3 eunit` / `rebar3 shell` without rebuilding the image.
       - ./src:/app/src
       - ./test:/app/test
+      - ./config:/app/config
+      # Compiled deps and beams live in a named volume, so a second
+      # `make test` reuses them instead of recompiling from scratch.
+      # Run `make clean` after changing rebar.config to drop stale ones.
+      - build-cache:/app/_build
+      # ERL_AFLAGS above only buys persistent history if $HOME/.cache
+      # outlives the container.
+      - shell-history:/root/.cache/erlang-history
+    # No healthcheck block here: the dev stage inherits the HEALTHCHECK from
+    # the base image, so the probe is defined once instead of drifting
+    # between two files.
+
+volumes:
+  build-cache:
+  shell-history:
