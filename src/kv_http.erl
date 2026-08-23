@@ -104,14 +104,16 @@ handle_request(health, _Method, Req) ->
 handle_request(store, <<"GET">>, Req) ->
     %% GET /store/{key}
     with_key(Req, fun(Key) ->
-        case kv_store:get(Key) of
+        case call_store(fun() -> kv_store:get(Key) end) of
             {ok, Key, Value} ->
                 reply(200, #{key => list_to_binary(Key), value => Value}, Req);
             {error, not_found} ->
                 reply(404, #{error => <<"key_not_found">>,
                              key => list_to_binary(Key)}, Req);
             {error, invalid_key} ->
-                reply(400, #{error => <<"invalid_key">>}, Req)
+                reply(400, #{error => <<"invalid_key">>}, Req);
+            {error, unavailable} ->
+                unavailable(Req)
         end
     end);
 
@@ -133,14 +135,16 @@ handle_request(store, <<"PUT">>, Req) ->
 handle_request(store, <<"DELETE">>, Req) ->
     %% DELETE /store/{key}
     with_key(Req, fun(Key) ->
-        case kv_store:delete(Key) of
+        case call_store(fun() -> kv_store:delete(Key) end) of
             ok ->
                 reply(204, Req);
             {error, not_found} ->
                 reply(404, #{error => <<"key_not_found">>,
                              key => list_to_binary(Key)}, Req);
             {error, invalid_key} ->
-                reply(400, #{error => <<"invalid_key">>}, Req)
+                reply(400, #{error => <<"invalid_key">>}, Req);
+            {error, unavailable} ->
+                unavailable(Req)
         end
     end);
 
@@ -158,13 +162,15 @@ store_from_body(Req) ->
             case decode_json(Body) of
                 {ok, #{<<"key">> := Key, <<"value">> := Value}} when is_binary(Key), Key /= <<>> ->
                     KeyStr = binary_to_list(Key),
-                    case kv_store:set(KeyStr, Value) of
+                    case call_store(fun() -> kv_store:set(KeyStr, Value) end) of
                         {ok, Outcome} ->
                             reply(created_or_ok(Outcome),
                                   #{key => Key, value => Value,
                                     status => <<"stored">>}, Req2);
                         {error, invalid_key} ->
-                            reply(400, #{error => <<"invalid_key">>}, Req2)
+                            reply(400, #{error => <<"invalid_key">>}, Req2);
+                        {error, unavailable} ->
+                            unavailable(Req2)
                     end;
                 {ok, #{<<"key">> := Key}} when is_binary(Key) ->
                     %% Missing value
@@ -185,13 +191,15 @@ store_with_key(Key, Req) ->
         {ok, Body, Req2} ->
             case decode_json(Body) of
                 {ok, #{<<"value">> := Value}} ->
-                    case kv_store:set(Key, Value) of
+                    case call_store(fun() -> kv_store:set(Key, Value) end) of
                         {ok, Outcome} ->
                             reply(created_or_ok(Outcome),
                                   #{key => list_to_binary(Key), value => Value,
                                     status => <<"stored">>}, Req2);
                         {error, invalid_key} ->
-                            reply(400, #{error => <<"invalid_key">>}, Req2)
+                            reply(400, #{error => <<"invalid_key">>}, Req2);
+                        {error, unavailable} ->
+                            unavailable(Req2)
                     end;
                 _ ->
                     reply(400, #{error => <<"invalid_json">>,
@@ -211,6 +219,22 @@ store_with_key(Key, Req) ->
 -spec created_or_ok(created | updated) -> 201 | 200.
 created_or_ok(created) -> 201;
 created_or_ok(updated) -> 200.
+
+%% kv_store is one gen_server, so a busy or restarting store makes every
+%% call exit -- timeout after call_timeout(), or noproc while the
+%% supervisor brings it back. Uncaught, that exit leaves cowboy to answer
+%% with a bodiless 500, the one response a JSON client cannot read. The
+%% listener deliberately survives a store restart (one_for_one), so this
+%% window is reachable in normal operation, and 503 is the honest answer.
+-spec call_store(fun(() -> Result)) -> Result | {error, unavailable}.
+call_store(Fun) ->
+    try Fun()
+    catch
+        exit:_ -> {error, unavailable}
+    end.
+
+unavailable(Req) ->
+    reply(503, #{error => <<"store_unavailable">>}, Req).
 
 %% Run Fun with the path key, or answer 400 when the route carried none.
 -spec with_key(cowboy_req:req(), fun((string()) -> cowboy_req:req())) ->

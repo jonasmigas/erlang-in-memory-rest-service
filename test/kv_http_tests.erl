@@ -67,6 +67,8 @@ http_test_() ->
       {"an unmatched path is a json 404", fun unmatched_path_is_json/0},
       {"an overwrite is a 200, a first write a 201",
        fun overwrite_is_not_created/0},
+      {"an unreachable store is a 503, not a bodiless 500",
+       {timeout, 30, fun store_unavailable/0}},
       {"stopping the listener child stops the listener",
        {timeout, 30, fun listener_restart/0}}
      ]}.
@@ -241,6 +243,36 @@ overwrite_is_not_created() ->
     %% and deleting it makes the next write a create again
     ?assertMatch({204, _}, request(delete, "/store/twice")),
     ?assertMatch({201, _}, request(put, "/store/twice", "{\"value\": \"four\"}")).
+
+store_unavailable() ->
+    %% The listener survives a kv_store restart by design (one_for_one),
+    %% so requests do land while the store is unreachable. Those calls
+    %% used to exit out of init/2 and cowboy answered with a bodiless
+    %% 500 -- unparseable for a client that decodes error bodies.
+    ?assertMatch({201, _}, request(put, "/store/frozen", "{\"value\": \"v\"}")),
+    ok = application:set_env(kv_store, call_timeout, 200),
+    Pid = whereis(kv_store),
+    ok = sys:suspend(Pid),
+    try
+        %% every verb, since each has its own call site
+        ?assertMatch({503, #{<<"error">> := <<"store_unavailable">>}},
+                     request(get, "/store/frozen")),
+        ?assertMatch({503, _}, request(put, "/store/frozen", "{\"value\": \"w\"}")),
+        ?assertMatch({503, _}, request(post, "/store", "{\"key\": \"f\", \"value\": 1}")),
+        ?assertMatch({503, _}, request(delete, "/store/frozen")),
+        %% /health does not touch the store, so it keeps answering --
+        %% which is worth knowing about, not asserting as desirable
+        ?assertMatch({200, _}, request(get, "/health"))
+    after
+        ok = sys:resume(Pid),
+        ok = application:set_env(kv_store, call_timeout, 5000)
+    end,
+    %% and the listener recovers on its own. Note a call that timed out
+    %% was still delivered: the store applies the queued writes once it
+    %% resumes, so /store/frozen is whatever those left behind. Assert
+    %% recovery on a fresh key rather than on that one.
+    ?assertMatch({201, _}, request(put, "/store/after_thaw", "{\"value\": \"t\"}")),
+    ?assertMatch({200, #{<<"value">> := <<"t">>}}, request(get, "/store/after_thaw")).
 
 head_mirrors_get() ->
     %% HEAD used to fall to the method-not-allowed clause, so curl -I and
