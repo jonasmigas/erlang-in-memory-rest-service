@@ -41,7 +41,8 @@ container).
 | `make up` / `make down` | Start the service and wait until it is healthy / stop it |
 | `make logs` | Follow the service logs |
 | `make health` | Ask the running service for `/health` |
-| `make release` | Build the production release image |
+| `make release` | Build the production release image, then smoke-test it |
+| `make smoke` | Boot that image and check it serves `/health` |
 | `make release-run` | Run that image in the foreground |
 | `make clean` | Stop everything, drop images and cached builds |
 
@@ -55,7 +56,7 @@ runs -- run `make clean` after changing `rebar.config` to drop stale ones.
 `rebar3` builds a relx release, not just a shell target:
 
 ```bash
-make release      # docker build --target runtime -t kv_store:latest .
+make release      # builds the runtime image, then boots it and checks /health
 make release-run  # runs it on http://localhost:18080
 ```
 
@@ -65,6 +66,11 @@ It is roughly 22 MB against roughly 81 MB for the dev image.
 
 Erlang distribution is confined to loopback and the node cookie is generated
 per container at first boot, so the release exposes only the HTTP port.
+
+`make release` finishes by booting the image and asking it for `/health`. The
+runtime stage runs an ERTS compiled against a different base image than it
+ships on, so a library skew between the two would otherwise build cleanly and
+fail only at startup -- the one failure nothing else here exercises.
 
 To build a release outside Docker, with Erlang/OTP 26 and rebar3 on the host:
 

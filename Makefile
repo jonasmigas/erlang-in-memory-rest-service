@@ -11,7 +11,7 @@ HOST_PORT     ?= 18080
 export HOST_PORT
 
 .DEFAULT_GOAL := help
-.PHONY: help build test shell up down logs health release release-run clean
+.PHONY: help build test shell up down logs health release smoke release-run clean
 
 help:
 	@echo "make build        Build the dev image"
@@ -22,6 +22,7 @@ help:
 	@echo "make logs         Follow the service logs"
 	@echo "make health       Ask the running service for /health"
 	@echo "make release      Build the production release image ($(RELEASE_IMAGE))"
+	@echo "make smoke        Boot that image and check it serves /health"
 	@echo "make release-run  Run that release image in the foreground"
 	@echo "make clean        Stop everything and drop images and cached builds"
 
@@ -60,6 +61,19 @@ health:
 # Builds only the runtime stage: the release, without rebar3 or the compiler.
 release:
 	docker build --target runtime -t $(RELEASE_IMAGE) .
+	@$(MAKE) --no-print-directory smoke
+
+# A release can build cleanly and still be unable to boot. The runtime stage
+# runs an ERTS compiled against a different base image than it ships on, so a
+# musl or OpenSSL soname skew between the two surfaces at startup, not at
+# build time -- and nothing else in this file exercises the release. Booting
+# it once and asking for /health turns that into a failed build.
+smoke:
+	-@docker rm -f kv-smoke >/dev/null 2>&1
+	@docker run -d --name kv-smoke $(RELEASE_IMAGE) >/dev/null
+	@docker exec kv-smoke sh -c 'i=0; until wget -qO- "http://localhost:$$APP_PORT/health"; do i=$$((i+1)); [ $$i -lt 30 ] || exit 1; sleep 1; done' >/dev/null 2>&1 || { echo "smoke: $(RELEASE_IMAGE) did not serve /health"; docker logs kv-smoke 2>&1 | tail -20; docker rm -f kv-smoke >/dev/null 2>&1; exit 1; }
+	-@docker rm -f kv-smoke >/dev/null 2>&1
+	@echo "smoke: $(RELEASE_IMAGE) booted and served /health"
 
 release-run: release
 	docker run --rm -p $(HOST_PORT):8080 $(RELEASE_IMAGE)
