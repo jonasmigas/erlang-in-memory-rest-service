@@ -191,9 +191,9 @@ store_body_key(Key, Value, Req) ->
         true ->
             case call_store(fun() -> kv_store:set(binary_to_list(Key), Value) end) of
                 {ok, Outcome} ->
-                    reply(created_or_ok(Outcome),
-                          #{key => Key, value => Value,
-                            status => <<"stored">>}, Req);
+                    stored(Outcome, Key,
+                           #{key => Key, value => Value,
+                             status => <<"stored">>}, Req);
                 {error, invalid_key} ->
                     reply(400, #{error => <<"invalid_key">>}, Req);
                 {error, unavailable} ->
@@ -211,9 +211,9 @@ store_with_key(Key, Req) ->
                 {ok, #{<<"value">> := Value}} ->
                     case call_store(fun() -> kv_store:set(Key, Value) end) of
                         {ok, Outcome} ->
-                            reply(created_or_ok(Outcome),
-                                  #{key => list_to_binary(Key), value => Value,
-                                    status => <<"stored">>}, Req2);
+                            stored(Outcome, list_to_binary(Key),
+                                   #{key => list_to_binary(Key), value => Value,
+                                     status => <<"stored">>}, Req2);
                         {error, invalid_key} ->
                             reply(400, #{error => <<"invalid_key">>}, Req2);
                         {error, unavailable} ->
@@ -235,12 +235,22 @@ store_with_key(Key, Req) ->
 %% Helper functions
 %% ===================================================================
 
-%% 201 only when the write actually created the key. RFC 7231 requires
-%% 200 or 204 when the target already had a representation, so a client
-%% can tell a create from an update by the status alone.
--spec created_or_ok(created | updated) -> 201 | 200.
-created_or_ok(created) -> 201;
-created_or_ok(updated) -> 200.
+%% 201 only when the write actually created the key; RFC 7231 requires
+%% 200 or 204 once the target has a representation, so the status alone
+%% tells a create from an update.
+%%
+%% A 201 also carries Location. POST /store puts the resource somewhere
+%% the request URI did not name, so without it the client has to rebuild
+%% and re-encode the path from a key it just sent.
+-spec stored(created | updated, binary(), map(), cowboy_req:req()) ->
+    cowboy_req:req().
+stored(created, Key, Body, Req) ->
+    Headers = maps:put(<<"location">>,
+                       <<"/store/", (cow_uri:urlencode(Key))/binary>>,
+                       json_headers()),
+    cowboy_req:reply(201, Headers, jsx:encode(Body), Req);
+stored(updated, _Key, Body, Req) ->
+    reply(200, Body, Req).
 
 %% kv_store is one gen_server, so a busy or restarting store makes every
 %% call exit -- timeout after call_timeout(), or noproc while the

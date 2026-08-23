@@ -77,6 +77,7 @@ http_test_() ->
        {timeout, 30, fun slow_body_is_a_timeout/0}},
       {"a body over the cap is still a 413", {timeout, 30, fun oversized_body/0}},
       {"a key that cannot round-trip is rejected", fun unusable_keys/0},
+      {"a created resource says where it went", fun created_has_location/0},
       {"stopping the listener child stops the listener",
        {timeout, 30, fun listener_restart/0}}
      ]}.
@@ -341,6 +342,22 @@ unusable_keys() ->
     %% An empty key names the empty key, not a missing value.
     ?assertMatch({400, #{<<"error">> := <<"invalid_key">>}},
                  request(post, "/store", "{\"key\": \"\", \"value\": \"v\"}")).
+
+created_has_location() ->
+    %% POST /store puts the resource somewhere the request URI does not
+    %% name, so 201 has to say where -- percent-encoded, since the key
+    %% may not be URL-safe.
+    {Status, Headers, _} =
+        request_with_headers(post, "/store", "{\"key\": \"loc key\", \"value\": \"v\"}"),
+    ?assertEqual(201, Status),
+    ?assertEqual("/store/loc%20key", proplists:get_value("location", Headers)),
+    %% and the path it named really is the entry
+    ?assertMatch({200, #{<<"value">> := <<"v">>}}, request(get, "/store/loc%20key")),
+    %% a replacement is a 200 and names nothing new
+    {Again, AgainHeaders, _} =
+        request_with_headers(post, "/store", "{\"key\": \"loc key\", \"value\": \"w\"}"),
+    ?assertEqual(200, Again),
+    ?assertEqual(undefined, proplists:get_value("location", AgainHeaders)).
 
 head_mirrors_get() ->
     %% HEAD used to fall to the method-not-allowed clause, so curl -I and
