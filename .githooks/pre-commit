@@ -1,0 +1,24 @@
+#!/bin/sh
+# Reminds about the test rule in CLAUDE.md: behavior changes under src/ should
+# come with matching EUnit tests in the same commit.
+#
+# This warns, it does not block -- pure refactors legitimately touch src/ only.
+
+changed=$(git diff --cached --name-only --diff-filter=ACMR)
+
+src_changed=$(printf '%s\n' "$changed" | grep -E '^src/.*\.erl$')
+test_changed=$(printf '%s\n' "$changed" | grep -E '^test/.*\.erl$')
+
+if [ -n "$src_changed" ] && [ -z "$test_changed" ]; then
+    echo >&2
+    echo "pre-commit: src/ changed but no test/ file is staged." >&2
+    echo >&2
+    printf '%s\n' "$src_changed" | sed 's/^/  /' >&2
+    echo >&2
+    echo "CLAUDE.md: new kv_store operations, HTTP routes/status codes, or edge" >&2
+    echo "cases need matching tests in test/kv_store_tests.erl in the same commit." >&2
+    echo "Ignore this if the change is a pure refactor or has no behavior change." >&2
+    echo >&2
+fi
+
+exit 0

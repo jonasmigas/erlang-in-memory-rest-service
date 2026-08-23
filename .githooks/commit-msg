@@ -1,0 +1,81 @@
+#!/bin/sh
+# Enforces the commit message format documented in CLAUDE.md:
+#
+#   type(scope): title (max 72 characters)
+#
+#   description explaining what changed and why
+#
+# Install: git config core.hooksPath .githooks
+
+msg_file="$1"
+
+# Strip comment lines so the trailing template does not count as a body.
+body_stripped=$(grep -v '^#' "$msg_file")
+
+subject=$(printf '%s\n' "$body_stripped" | sed -n '1p')
+second=$(printf '%s\n' "$body_stripped" | sed -n '2p')
+body=$(printf '%s\n' "$body_stripped" | sed -n '3,$p' | grep -v '^[[:space:]]*$')
+
+fail() {
+    echo "commit-msg: $1" >&2
+    echo >&2
+    echo "Required format (see CLAUDE.md):" >&2
+    echo >&2
+    echo "  type(scope): title (max 72 characters)" >&2
+    echo >&2
+    echo "  description explaining what changed and why" >&2
+    echo >&2
+    echo "  type:  init | feat | fix | docs | refactor | test | chore" >&2
+    echo "  scope: affected area, e.g. store, http, app, docker, readme, repo" >&2
+    echo "  title: imperative, lowercase, no trailing period, <= 72 chars" >&2
+    echo >&2
+    echo "Your subject was:" >&2
+    echo "  $subject" >&2
+    exit 1
+}
+
+# Let git's own generated messages through.
+case "$subject" in
+    "Merge "*|"Revert "*|"fixup! "*|"squash! "*) exit 0 ;;
+esac
+
+[ -n "$subject" ] || fail "commit message is empty"
+
+# 72 is GitHub's display cutoff: past it the subject is visibly truncated.
+if [ "${#subject}" -gt 72 ]; then
+    fail "subject is ${#subject} characters, maximum is 72"
+fi
+
+# 50 is the long-standing git convention. Warn, do not block -- the
+# "type(scope): " prefix alone spends 12-15 characters.
+if [ "${#subject}" -gt 50 ]; then
+    echo "commit-msg: subject is ${#subject} characters; 50 or fewer reads better in git log --oneline." >&2
+    echo "  $subject" >&2
+    echo >&2
+fi
+
+if ! printf '%s' "$subject" | grep -Eq '^(init|feat|fix|docs|refactor|test|chore)\([a-z0-9][a-z0-9._-]*\): .+$'; then
+    fail "subject does not match 'type(scope): title'"
+fi
+
+title=${subject#*: }
+
+# Reject a capitalised ordinary word (Add, Fix, Update) but allow an
+# all-caps acronym (OTP, HTTP, REST, API) -- unavoidable in an Erlang repo.
+if printf '%s' "$title" | grep -Eq '^[A-Z][a-z]'; then
+    fail "title must start lowercase: '$title'"
+fi
+
+case "$title" in
+    *.) fail "title must not end with a period: '$title'" ;;
+esac
+
+if [ -n "$second" ]; then
+    fail "subject and description must be separated by a blank line"
+fi
+
+if [ -z "$body" ]; then
+    fail "commit needs a description body explaining what changed and why"
+fi
+
+exit 0
