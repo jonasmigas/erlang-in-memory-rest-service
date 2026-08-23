@@ -23,6 +23,26 @@ free_port() ->
     Port.
 
 %% ===================================================================
+%% Fixture guard
+%%
+%% Outside the fixture on purpose: it asserts that clearing a stray
+%% store does not take this very process with it. If the kill ever
+%% propagates along the link again, this test does not fail -- the
+%% runner dies and eunit reports the whole module cancelled, which is
+%% exactly the failure being guarded against.
+%% ===================================================================
+
+stray_store_is_stopped_without_killing_the_runner_test() ->
+    %% kv_store_tests may already have left one registered, depending on
+    %% the order eunit picked; clear that before starting our own.
+    ok = stop_stray_store(),
+    {ok, Pid} = kv_store:start_link(),
+    ?assert(is_process_alive(Pid)),
+    ?assertEqual(ok, stop_stray_store()),
+    ?assert(is_process_alive(self())),
+    ?assertEqual(undefined, whereis(kv_store)).
+
+%% ===================================================================
 %% Fixture
 %% ===================================================================
 
@@ -53,7 +73,7 @@ setup() ->
     %% with already_started. Clear it before starting the application.
     ok = stop_stray_store(),
     {ok, _} = application:ensure_all_started(inets),
-    ok = application:load(kv_store),
+    ok = load_kv_store(),
     ok = application:set_env(kv_store, port, free_port()),
     {ok, _} = application:ensure_all_started(kv_store),
     up = wait_for_listener(up, 100),
@@ -61,7 +81,20 @@ setup() ->
 
 cleanup(_) ->
     application:stop(kv_store),
+    %% Unload as well. application:stop/1 leaves the application loaded,
+    %% so a second run of this fixture in the same VM would fail in
+    %% setup/0 with {error, {already_loaded, kv_store}}.
+    application:unload(kv_store),
     ok.
+
+%% Tolerate an application left loaded by an earlier aborted run, so a
+%% crashed fixture does not poison every later one.
+load_kv_store() ->
+    case application:load(kv_store) of
+        ok -> ok;
+        {error, {already_loaded, kv_store}} -> ok;
+        Error -> Error
+    end.
 
 %% ===================================================================
 %% Test cases
@@ -207,17 +240,23 @@ http_child_id() ->
     [Id | _] = [I || {I, _, _, _} <- Children, I =/= kv_store],
     Id.
 
+%% kv_store_tests starts its gen_server with start_link/0 from the eunit
+%% test process, so a stray is linked to the runner. exit(Pid, kill)
+%% follows that link and kills the runner too: the suite aborts with
+%% "unexpected termination of test process ::killed" and reports
+%% Failed: 0 while silently cancelling every test in this module. Only
+%% rebar3's alphabetical ordering hid it. gen_server:stop/3 terminates
+%% the process with reason normal, which linked processes ignore.
 stop_stray_store() ->
     case whereis(kv_store) of
         undefined ->
             ok;
         Pid ->
-            MRef = monitor(process, Pid),
-            exit(Pid, kill),
-            receive
-                {'DOWN', MRef, process, Pid, _} -> ok
-            after 5000 ->
-                {error, stray_store_not_stopped}
+            try gen_server:stop(Pid, normal, 5000) of
+                ok -> ok
+            catch
+                exit:noproc -> ok;
+                _:_ -> {error, stray_store_not_stopped}
             end
     end.
 
