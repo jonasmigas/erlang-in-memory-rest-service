@@ -1,5 +1,7 @@
 # KV Store - In-Memory Key-Value HTTP REST Service
 
+[![CI](https://github.com/jonasmigas/miniclip-assessment/actions/workflows/ci.yml/badge.svg)](https://github.com/jonasmigas/miniclip-assessment/actions/workflows/ci.yml)
+
 A simple in-memory key-value store with a REST API, built in Erlang using OTP and Cowboy.
 
 ## Features
@@ -171,6 +173,20 @@ make test
 
 Equivalent to `docker compose run --rm kv_store rebar3 eunit`, or plain
 `rebar3 eunit` if you have rebar3 on the host.
+
+### Continuous integration
+
+`.github/workflows/ci.yml` runs on every push to `master` and every pull
+request. It calls the same `make` targets a developer calls, so CI uses the
+pinned OTP 26 image and its rebar3 rather than a second toolchain installed
+beside it that could pass while the real build fails.
+
+| Job | What it guards |
+|-----|----------------|
+| `make test` | the suite, and `warnings_as_errors` at compile time |
+| the reverse module order | the suite passes in rebar3's default order because that order happens to be the safe one; this stops a rename quietly reintroducing the fixture bug |
+| `make release` | a release that compiles but cannot boot -- the target ends by starting the image and asking it for `/health` |
+| commit messages | each commit in a pull request, by running `.githooks/commit-msg` itself rather than restating its rules |
 
 ### Commit hooks
 
