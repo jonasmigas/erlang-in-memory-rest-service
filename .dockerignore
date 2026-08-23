@@ -1,18 +1,21 @@
 # Keep the build context small and the image free of host artefacts.
+# Patterns are matched from the context root and a bare * does not cross a
+# slash, so anything that can appear in a subdirectory needs **/.
 .git
 .githooks
 .gitattributes
 .gitignore
 .claude
 _build
-rebar3
-*.beam
-erl_crash.dump
 .rebar3
+ebin/
+rebar3
+**/*.beam
+**/erl_crash.dump
 
 # Build tooling and docs are never COPYed into the image.
 Dockerfile
 .dockerignore
 docker-compose.yml
 Makefile
-*.md
+**/*.md
