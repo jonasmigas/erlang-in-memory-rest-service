@@ -90,6 +90,20 @@ invalid_key_test() ->
     {error, invalid_key} = kv_store:delete(<<>>),
     teardown(ok).
 
+%% With no store running there is no table, and a read has to say so
+%% rather than crash the caller -- the HTTP layer turns this into a 503.
+no_store_running_test() ->
+    %% teardown/1 here is a no-op, so stop the store explicitly. Exiting
+    %% it normally rather than killing it matters: setup/0 used
+    %% start_link/0, so a kill would follow the link into the runner.
+    case whereis(kv_store) of
+        undefined -> ok;
+        Pid -> catch gen_server:stop(Pid, normal, 5000)
+    end,
+    ?assertEqual(undefined, whereis(kv_store)),
+    ?assertEqual({error, unavailable}, kv_store:get(<<"anything">>)),
+    ?assertEqual(#{}, kv_store:get_all()).
+
 %% Overwrite test
 overwrite_test() ->
     setup(),

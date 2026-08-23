@@ -12,6 +12,7 @@
 -export([start_link/0, set/2, get/1, delete/1, clear_all/0, get_all/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
+-define(TABLE, kv_store_table).
 -define(DEFAULT_CALL_TIMEOUT, 5000).
 
 %% Overridable so a caller that must answer quickly -- or a test -- can
@@ -36,11 +37,43 @@ set(<<>>, _Value) ->
 set(Key, Value) ->
     gen_server:call(?MODULE, {set, Key, Value}, call_timeout()).
 
--spec get(binary()) -> {ok, binary(), any()} | {error, not_found} | {error, invalid_key}.
+%% Read in the calling process, straight from ETS, rather than sending a
+%% message to the store and waiting.
+%%
+%% The reason is availability, not speed. A gen_server handles one
+%% message at a time, so every read queued behind every other request and
+%% behind every write: one slow or wedged caller stalled all of them, and
+%% a busy store turned reads into timeouts. Reading from the table
+%% removes reads from that queue entirely -- kv_http_tests proves it,
+%% by suspending the store process and watching reads keep answering
+%% while writes correctly report 503.
+%%
+%% It should also let reads use more than one core, since ETS reads run
+%% concurrently while a process cannot. That is the standard reason to
+%% do this, but it is not measured here: throughput on this setup varied
+%% by 3x between identical runs, which is not a basis for a number.
+%%
+%% What it does NOT fix: a large value is still copied to the caller, so
+%% one client pulling a big entry still costs the whole node CPU and
+%% allocator bandwidth. Measured, that degrades small-key reads about
+%% the same either way.
+%%
+%% The table is `protected` and owned by the gen_server, so writes stay
+%% serialised there and this cannot race with them; it also means the
+%% table dies with the store, which keeps the existing durability
+%% semantics rather than quietly changing them.
+-spec get(binary()) ->
+    {ok, binary(), any()} | {error, not_found | invalid_key | unavailable}.
 get(<<>>) ->
     {error, invalid_key};
 get(Key) ->
-    gen_server:call(?MODULE, {get, Key}, call_timeout()).
+    try ets:lookup(?TABLE, Key) of
+        [{Key, Value}] -> {ok, Key, Value};
+        [] -> {error, not_found}
+    catch
+        %% No table means no owner: the store is down or restarting.
+        error:badarg -> {error, unavailable}
+    end.
 
 -spec delete(binary()) -> ok | {error, not_found} | {error, invalid_key}.
 delete(<<>>) ->
@@ -54,35 +87,40 @@ clear_all() ->
 
 -spec get_all() -> map().
 get_all() ->
-    gen_server:call(?MODULE, get_all, call_timeout()).
+    try maps:from_list(ets:tab2list(?TABLE))
+    catch error:badarg -> #{}
+    end.
 
 %% ===================================================================
 %% gen_server callbacks
 %% ===================================================================
 
 init([]) ->
-    {ok, #{}}.
+    %% protected: this process is the only writer, everyone reads. Owned
+    %% here so the data dies with the store exactly as the map did.
+    ?TABLE = ets:new(?TABLE, [named_table, protected, {read_concurrency, true}]),
+    {ok, ?TABLE}.
 
-handle_call({set, Key, Value}, _From, State) ->
-    Outcome = case maps:is_key(Key, State) of
-        true -> updated;
-        false -> created
+%% Writes stay here. Serialising them is what makes created-vs-updated a
+%% single atomic decision -- ets:insert_new/2 answers it in the same
+%% operation that does the write, and no other writer can be in flight.
+handle_call({set, Key, Value}, _From, T) ->
+    Outcome = case ets:insert_new(T, {Key, Value}) of
+        true ->
+            created;
+        false ->
+            true = ets:insert(T, {Key, Value}),
+            updated
     end,
-    {reply, {ok, Outcome}, maps:put(Key, Value, State)};
-handle_call({get, Key}, _From, State) ->
-    case maps:find(Key, State) of
-        {ok, Value} -> {reply, {ok, Key, Value}, State};
-        error -> {reply, {error, not_found}, State}
+    {reply, {ok, Outcome}, T};
+handle_call({delete, Key}, _From, T) ->
+    case ets:member(T, Key) of
+        true -> true = ets:delete(T, Key), {reply, ok, T};
+        false -> {reply, {error, not_found}, T}
     end;
-handle_call({delete, Key}, _From, State) ->
-    case maps:is_key(Key, State) of
-        true -> {reply, ok, maps:remove(Key, State)};
-        false -> {reply, {error, not_found}, State}
-    end;
-handle_call(clear_all, _From, _State) ->
-    {reply, ok, #{}};
-handle_call(get_all, _From, State) ->
-    {reply, State, State}.
+handle_call(clear_all, _From, T) ->
+    true = ets:delete_all_objects(T),
+    {reply, ok, T}.
 
 handle_cast(_Msg, State) ->
     {noreply, State}.
