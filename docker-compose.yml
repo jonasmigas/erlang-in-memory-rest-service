@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  kv_store:
+    build: .
+    ports:
+      - "18080:8080"
+    environment:
+      - ERL_AFLAGS=-kernel shell_history enabled
+    volumes:
+      - ./src:/app/src
+      - ./test:/app/test

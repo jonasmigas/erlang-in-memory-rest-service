@@ -1,0 +1,14 @@
+# Rebar3 / Erlang build artifacts
+_build/
+.rebar3/
+*.beam
+erl_crash.dump
+ebin/
+.eunit/
+
+# Editor / OS
+.vscode/
+.DS_Store
+
+# Personal notes (not part of the deliverable)
+Assessment.md
