@@ -9,6 +9,9 @@
     cowboy,
     jsx
    ]},
-  {env, []},
+  %% The application's own default. application:get_env/2 finds it
+  %% wherever kv_store is loaded, so no caller needs a fallback of
+  %% its own and there is one literal to change.
+  {env, [{port, 8080}]},
   {modules, []}
  ]}.
