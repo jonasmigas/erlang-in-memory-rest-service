@@ -43,6 +43,46 @@ rebar3 shell
 
 The API is now available at `http://localhost:8080`.
 
+## API
+
+All requests and responses are JSON. Ports below assume the non-Docker run
+on 8080; with `docker-compose` use 18080.
+
+| Method | Endpoint | Request body | Success | Errors |
+|--------|----------|--------------|---------|--------|
+| `GET` | `/store/:key` | — | `200` `{"key":...,"value":...}` | `404` `key_not_found` |
+| `POST` | `/store/:key` | `{"value": ...}` | `201` | `400`, `413` |
+| `POST` | `/store` | `{"key": ..., "value": ...}` | `201` | `400`, `413` |
+| `PUT` | `/store/:key` | `{"value": ...}` | `201` | `400`, `413` |
+| `DELETE` | `/store/:key` | — | `204` | `404` `key_not_found` |
+| `GET` | `/health` | — | `200` `{"status":"ok",...}` | — |
+
+An unsupported method returns `405`. A missing or empty key, or a malformed
+JSON body, returns `400`. A body over the size limit returns `413`.
+
+Reading a key that holds no data is always a `404` with an explicit
+`key_not_found` error, never an empty `200` -- a client can tell "no data
+associated with this key" apart from "this key holds an empty value".
+
+### Examples
+
+```bash
+# Store a value
+curl -X POST http://localhost:8080/store/user_123   -H 'Content-Type: application/json'   -d '{"value": {"name": "Ana", "score": 42}}'
+
+# Retrieve it -- returns both the key and the data
+curl http://localhost:8080/store/user_123
+# {"key":"user_123","value":{"name":"Ana","score":42}}
+
+# Clear it
+curl -X DELETE http://localhost:8080/store/user_123
+
+# Subsequent reads report the key as unset
+curl -i http://localhost:8080/store/user_123
+# HTTP/1.1 404 Not Found
+# {"error":"key_not_found","key":"user_123"}
+```
+
 ## Development
 
 ### Running the tests
