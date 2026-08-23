@@ -1,13 +1,15 @@
 # `version:` is omitted deliberately: Compose v2 ignores it and warns that the
-# attribute is obsolete.
+# attribute is obsolete. This file needs Compose v2.
 
 services:
   kv_store:
     build:
       context: .
       target: dev
+    # HOST_PORT is exported by the Makefile, so `make up HOST_PORT=19090`
+    # changes the published port as well as the banner and the health probe.
     ports:
-      - "18080:8080"
+      - "${HOST_PORT:-18080}:8080"
     environment:
       - ERL_AFLAGS=-kernel shell_history enabled
     volumes:
@@ -23,12 +25,9 @@ services:
       # ERL_AFLAGS above only buys persistent history if $HOME/.cache
       # outlives the container.
       - shell-history:/root/.cache/erlang-history
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8080/health"]
-      interval: 10s
-      timeout: 3s
-      start_period: 20s
-      retries: 3
+    # No healthcheck block here: the dev stage inherits the HEALTHCHECK from
+    # the base image, so the probe is defined once instead of drifting
+    # between two files.
 
 volumes:
   build-cache:
