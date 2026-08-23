@@ -1,12 +1,10 @@
 %%%-------------------------------------------------------------------
-%%% @doc Cowboy HTTP server for the KV Store REST API.
+%%% @doc Cowboy HTTP handler for the KV Store REST API.
 %%% Provides endpoints for set, get, delete operations.
 %%%-------------------------------------------------------------------
 -module(kv_http).
--behaviour(application).
+-behaviour(cowboy_handler).
 
-%% Application callbacks
--export([start/0, start/2, stop/0, stop/1]).
 %% Supervisor child API
 -export([child_spec/0]).
 %% Cowboy handler
@@ -47,27 +45,7 @@ port() ->
     application:get_env(kv_store, port, ?DEFAULT_PORT).
 
 %% ===================================================================
-%% Application callbacks (for running as a child)
-%% ===================================================================
-
--spec start() -> {ok, pid()} | {error, any()}.
-start() ->
-    start(permanent, []).
-
--spec start(application:start_type(), any()) -> {ok, pid()} | {error, any()}.
-start(_StartType, _StartArgs) ->
-    start_http_server().
-
--spec stop() -> ok.
-stop() ->
-    stop(ok).
-
--spec stop(any()) -> ok.
-stop(_State) ->
-    cowboy:stop_listener(?MODULE).
-
-%% ===================================================================
-%% Internal: Start Cowboy
+%% Routing
 %% ===================================================================
 
 -spec dispatch() -> cowboy_router:dispatch_rules().
@@ -80,19 +58,11 @@ dispatch() ->
         ]}
     ]).
 
-start_http_server() ->
-    {ok, _Pid} = cowboy:start_clear(?MODULE,
-        [{port, port()}],
-        #{env => #{dispatch => dispatch()}}
-    ),
-    io:format("~n~s HTTP Server started on port ~p~n", [?MODULE, port()]),
-    {ok, self()}.
-
 %% ===================================================================
 %% Cowboy HTTP Handler
 %% ===================================================================
 
--spec init(cowboy_req:req(), any()) -> {cowboy_loop, cowboy_req:req(), any()}.
+-spec init(cowboy_req:req(), any()) -> {ok, cowboy_req:req(), any()}.
 init(Req0, State) ->
     Method = cowboy_req:method(Req0),
     Path = cowboy_req:path(Req0),
