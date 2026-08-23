@@ -12,7 +12,7 @@
 %% Cowboy handler
 -export([init/2, terminate/3]).
 
--define(PORT, 8080).
+-define(DEFAULT_PORT, 8080).
 -define(MAX_BODY_SIZE, 1048576).  %% 1MB
 
 %% ===================================================================
@@ -53,6 +53,12 @@ stop(_State) ->
 %% Internal: Start Cowboy
 %% ===================================================================
 
+%% The listen port, overridable so a deployment (or a test) can pick one
+%% that is free. Docker maps the container's port to 18080 on the host.
+-spec port() -> inet:port_number().
+port() ->
+    application:get_env(kv_store, port, ?DEFAULT_PORT).
+
 start_http_server() ->
     %% Create the dispatch routes
     Dispatch = cowboy_router:compile([
@@ -65,10 +71,10 @@ start_http_server() ->
 
     %% Start the cowboy listener
     {ok, _Pid} = cowboy:start_clear(?MODULE,
-        [{port, ?PORT}],
+        [{port, port()}],
         #{env => #{dispatch => Dispatch}}
     ),
-    io:format("~n~s HTTP Server started on port ~p~n", [?MODULE, ?PORT]),
+    io:format("~n~s HTTP Server started on port ~p~n", [?MODULE, port()]),
     {ok, self()}.
 
 %% ===================================================================
