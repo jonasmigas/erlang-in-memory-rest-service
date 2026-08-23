@@ -76,6 +76,10 @@ http_test_() ->
       {"a body that never arrives is a 408, not a 413",
        {timeout, 30, fun slow_body_is_a_timeout/0}},
       {"a body over the cap is still a 413", {timeout, 30, fun oversized_body/0}},
+      {"a key that cannot round-trip is rejected", fun unusable_keys/0},
+      {"a created resource says where it went", fun created_has_location/0},
+      {"a body with no value says so, either way",
+       fun missing_value_agrees/0},
       {"stopping the listener child stops the listener",
        {timeout, 30, fun listener_restart/0}}
      ]}.
@@ -286,26 +290,23 @@ slow_body_is_a_timeout() ->
     %% too_large, but cowboy also answers {more, ...} when the read
     %% period expires. A client that stalled mid-body was told its
     %% handful of bytes exceeded 1MB, and the write was dropped.
-    ok = application:set_env(kv_store, body_deadline, 400),
+    %% Wide enough that ordinary scheduling jitter cannot look like the
+    %% deadline expiring -- at 400ms this flaked once, reporting a status
+    %% that was not 408 on a run that had changed nothing.
+    ok = application:set_env(kv_store, body_deadline, 1500),
     try
         {ok, Sock} = gen_tcp:connect({127, 0, 0, 1}, listen_port(),
                                      [binary, {active, false}, {packet, raw}]),
         %% headers promise 20 bytes; none of them ever follow
         ok = gen_tcp:send(Sock,
-             "POST /store/slowbody HTTP/1.1
-"
-             "Host: 127.0.0.1
-"
-             "Content-Type: application/json
-"
-             "Content-Length: 20
-"
-             "Connection: close
-
-"),
+             "POST /store/slowbody HTTP/1.1\r\n"
+             "Host: 127.0.0.1\r\n"
+             "Content-Type: application/json\r\n"
+             "Content-Length: 20\r\n"
+             "Connection: close\r\n\r\n"),
         {ok, Resp} = gen_tcp:recv(Sock, 0, 10000),
         gen_tcp:close(Sock),
-        ?assertMatch({match, _}, re:run(Resp, "^HTTP/1\.1 408 ")),
+        ?assertMatch({match, _}, re:run(Resp, "^HTTP/1\\.1 408 ")),
         ?assertMatch({match, _}, re:run(Resp, "request_timeout"))
     after
         ok = application:set_env(kv_store, body_deadline, 15000)
@@ -320,6 +321,56 @@ oversized_body() ->
     ?assertMatch({413, #{<<"error">> := <<"request_too_large">>}},
                  request(put, "/store/toobig", binary_to_list(Body))),
     ?assertMatch({404, _}, request(get, "/store/toobig")).
+
+unusable_keys() ->
+    %% A client reads a key out of a response and puts it back in a URL.
+    %% These cannot survive that, so storing them only produces an entry
+    %% nobody can name.
+
+    %% Not valid UTF-8: jsx encodes it as U+FFFD, so /store/%FF and
+    %% /store/%FE both reported the same key, and asking for that back
+    %% was a third key that did not exist.
+    ?assertMatch({400, #{<<"error">> := <<"invalid_key">>}},
+                 request(put, "/store/%FF", "{\"value\": \"raw\"}")),
+    ?assertMatch({400, _}, request(get, "/store/%FE")),
+
+    %% Dot segments: cowboy removes these before a binding exists, so
+    %% the entry was writable through the body and then unreachable and
+    %% undeletable through the path.
+    ?assertMatch({400, #{<<"error">> := <<"invalid_key">>}},
+                 request(post, "/store", "{\"key\": \"..\", \"value\": \"v\"}")),
+    ?assertMatch({400, _}, request(post, "/store", "{\"key\": \".\", \"value\": \"v\"}")),
+
+    %% An empty key names the empty key, not a missing value.
+    ?assertMatch({400, #{<<"error">> := <<"invalid_key">>}},
+                 request(post, "/store", "{\"key\": \"\", \"value\": \"v\"}")).
+
+created_has_location() ->
+    %% POST /store puts the resource somewhere the request URI does not
+    %% name, so 201 has to say where -- percent-encoded, since the key
+    %% may not be URL-safe.
+    {Status, Headers, _} =
+        request_with_headers(post, "/store", "{\"key\": \"loc key\", \"value\": \"v\"}"),
+    ?assertEqual(201, Status),
+    ?assertEqual("/store/loc%20key", proplists:get_value("location", Headers)),
+    %% and the path it named really is the entry
+    ?assertMatch({200, #{<<"value">> := <<"v">>}}, request(get, "/store/loc%20key")),
+    %% a replacement is a 200 and names nothing new
+    {Again, AgainHeaders, _} =
+        request_with_headers(post, "/store", "{\"key\": \"loc key\", \"value\": \"w\"}"),
+    ?assertEqual(200, Again),
+    ?assertEqual(undefined, proplists:get_value("location", AgainHeaders)).
+
+missing_value_agrees() ->
+    %% Same mistake, same answer, whichever form carried the key. The
+    %% path form used to call this valid JSON invalid.
+    ?assertMatch({400, #{<<"error">> := <<"missing_value">>}},
+                 request(post, "/store", "{\"key\": \"novalue\"}")),
+    ?assertMatch({400, #{<<"error">> := <<"missing_value">>}},
+                 request(put, "/store/novalue", "{}")),
+    %% and genuinely malformed JSON still reports as malformed
+    ?assertMatch({400, #{<<"error">> := <<"invalid_json">>}},
+                 request(put, "/store/novalue", "{not json")).
 
 head_mirrors_get() ->
     %% HEAD used to fall to the method-not-allowed clause, so curl -I and

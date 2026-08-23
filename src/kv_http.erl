@@ -124,14 +124,16 @@ handle_request(store, <<"GET">>, Req) ->
 handle_request(store, <<"POST">>, Req) ->
     case extract_key(Req) of
         {ok, Key} -> store_with_key(Key, Req);
-        {error, missing_key} -> store_from_body(Req)
+        {error, missing_key} -> store_from_body(Req);
+        {error, invalid_key} -> reply(400, #{error => <<"invalid_key">>}, Req)
     end;
 
 handle_request(store, <<"PUT">>, Req) ->
     %% PUT /store/{key} with JSON body: {"value": "myvalue"}
     case extract_key(Req) of
         {ok, Key} -> store_with_key(Key, Req);
-        {error, missing_key} -> reply(400, #{error => <<"key_required_in_path">>}, Req)
+        {error, missing_key} -> reply(400, #{error => <<"key_required_in_path">>}, Req);
+        {error, invalid_key} -> reply(400, #{error => <<"invalid_key">>}, Req)
     end;
 
 handle_request(store, <<"DELETE">>, Req) ->
@@ -158,28 +160,26 @@ handle_request(store, _Method, Req) ->
 %% ===================================================================
 
 %% The key comes from the body: {"key": "mykey", "value": "myvalue"}.
-store_from_body(Req) ->
+%% Owns the body read and every way it can fail, so the two write paths
+%% cannot disagree about how a slow, oversized or unparseable body is
+%% reported. They had already drifted once: one grew a missing-value
+%% answer and the other kept calling that body malformed.
+%%
+%% Fun sees a decoded JSON object and returns the response. Anything
+%% that is not an object -- an array, a bare string, a parse failure --
+%% never reaches it and is answered with Expected.
+-spec with_json_body(cowboy_req:req(), binary(),
+                     fun((map(), cowboy_req:req()) -> cowboy_req:req())) ->
+    cowboy_req:req().
+with_json_body(Req, Expected, Fun) ->
     case read_body(Req) of
         {ok, Body, Req2} ->
             case decode_json(Body) of
-                {ok, #{<<"key">> := Key, <<"value">> := Value}} when is_binary(Key), Key /= <<>> ->
-                    KeyStr = binary_to_list(Key),
-                    case call_store(fun() -> kv_store:set(KeyStr, Value) end) of
-                        {ok, Outcome} ->
-                            reply(created_or_ok(Outcome),
-                                  #{key => Key, value => Value,
-                                    status => <<"stored">>}, Req2);
-                        {error, invalid_key} ->
-                            reply(400, #{error => <<"invalid_key">>}, Req2);
-                        {error, unavailable} ->
-                            unavailable(Req2)
-                    end;
-                {ok, #{<<"key">> := Key}} when is_binary(Key) ->
-                    %% Missing value
-                    reply(400, #{error => <<"missing_value">>}, Req2);
+                {ok, Decoded} when is_map(Decoded) ->
+                    Fun(Decoded, Req2);
                 _ ->
                     reply(400, #{error => <<"invalid_json">>,
-                                 message => <<"Expected {\"key\":\"...\", \"value\":\"...\"}">>}, Req2)
+                                 message => Expected}, Req2)
             end;
         {error, too_large} ->
             reply(413, #{error => <<"request_too_large">>}, Req);
@@ -189,46 +189,76 @@ store_from_body(Req) ->
             reply(400, #{error => <<"bad_request">>}, Req)
     end.
 
-%% The key came from the path, so the body carries only {"value": ...}.
-%% extract_key/1 never yields an empty key, so there is no empty-key
-%% clause here.
-store_with_key(Key, Req) ->
-    case read_body(Req) of
-        {ok, Body, Req2} ->
-            case decode_json(Body) of
-                {ok, #{<<"value">> := Value}} ->
-                    case call_store(fun() -> kv_store:set(Key, Value) end) of
-                        {ok, Outcome} ->
-                            reply(created_or_ok(Outcome),
-                                  #{key => list_to_binary(Key), value => Value,
-                                    status => <<"stored">>}, Req2);
-                        {error, invalid_key} ->
-                            reply(400, #{error => <<"invalid_key">>}, Req2);
-                        {error, unavailable} ->
-                            unavailable(Req2)
-                    end;
-                _ ->
-                    reply(400, #{error => <<"invalid_json">>,
-                                 message => <<"Expected {\"value\":\"...\"}">>}, Req2)
-            end;
-        {error, too_large} ->
-            reply(413, #{error => <<"request_too_large">>}, Req);
-        {error, timeout} ->
-            reply(408, #{error => <<"request_timeout">>}, Req);
-        {error, bad_request} ->
-            reply(400, #{error => <<"bad_request">>}, Req)
+%% The one place a key and a value become a stored entry and a response,
+%% whichever form the request used to carry them.
+%%
+%% valid_key/1 runs here even for a path key that extract_key/1 already
+%% checked: the rule belongs to writing, not to one route, and paying a
+%% second cheap check is better than a second place to forget it.
+-spec write(binary(), any(), cowboy_req:req()) -> cowboy_req:req().
+write(Key, Value, Req) ->
+    case valid_key(Key) of
+        false ->
+            reply(400, #{error => <<"invalid_key">>}, Req);
+        true ->
+            case call_store(fun() -> kv_store:set(binary_to_list(Key), Value) end) of
+                {ok, Outcome} ->
+                    stored(Outcome, Key,
+                           #{key => Key, value => Value,
+                             status => <<"stored">>}, Req);
+                {error, invalid_key} ->
+                    reply(400, #{error => <<"invalid_key">>}, Req);
+                {error, unavailable} ->
+                    unavailable(Req)
+            end
     end.
+
+%% The key comes from the body: {"key": "mykey", "value": "myvalue"}.
+store_from_body(Req) ->
+    Expected = <<"Expected {\"key\":\"...\", \"value\":\"...\"}">>,
+    with_json_body(Req, Expected,
+        fun(#{<<"key">> := Key, <<"value">> := Value}, Req2) when is_binary(Key) ->
+                write(Key, Value, Req2);
+           (#{<<"key">> := Key}, Req2) when is_binary(Key) ->
+                %% Valid JSON, key present, value absent -- say that,
+                %% rather than blaming the JSON.
+                reply(400, #{error => <<"missing_value">>}, Req2);
+           (_, Req2) ->
+                %% An object, but not one this route can read: no key, or
+                %% a key that is not a string.
+                reply(400, #{error => <<"invalid_json">>,
+                             message => Expected}, Req2)
+        end).
+
+%% The key came from the path, so the body carries only {"value": ...}.
+store_with_key(Key, Req) ->
+    with_json_body(Req, <<"Expected {\"value\":\"...\"}">>,
+        fun(#{<<"value">> := Value}, Req2) ->
+                write(list_to_binary(Key), Value, Req2);
+           (_, Req2) ->
+                reply(400, #{error => <<"missing_value">>}, Req2)
+        end).
 
 %% ===================================================================
 %% Helper functions
 %% ===================================================================
 
-%% 201 only when the write actually created the key. RFC 7231 requires
-%% 200 or 204 when the target already had a representation, so a client
-%% can tell a create from an update by the status alone.
--spec created_or_ok(created | updated) -> 201 | 200.
-created_or_ok(created) -> 201;
-created_or_ok(updated) -> 200.
+%% 201 only when the write actually created the key; RFC 7231 requires
+%% 200 or 204 once the target has a representation, so the status alone
+%% tells a create from an update.
+%%
+%% A 201 also carries Location. POST /store puts the resource somewhere
+%% the request URI did not name, so without it the client has to rebuild
+%% and re-encode the path from a key it just sent.
+-spec stored(created | updated, binary(), map(), cowboy_req:req()) ->
+    cowboy_req:req().
+stored(created, Key, Body, Req) ->
+    Headers = maps:put(<<"location">>,
+                       <<"/store/", (cow_uri:urlencode(Key))/binary>>,
+                       json_headers()),
+    cowboy_req:reply(201, Headers, jsx:encode(Body), Req);
+stored(updated, _Key, Body, Req) ->
+    reply(200, Body, Req).
 
 %% kv_store is one gen_server, so a busy or restarting store makes every
 %% call exit -- timeout after call_timeout(), or noproc while the
@@ -252,7 +282,8 @@ unavailable(Req) ->
 with_key(Req, Fun) ->
     case extract_key(Req) of
         {ok, Key} -> Fun(Key);
-        {error, missing_key} -> reply(400, #{error => <<"missing_key">>}, Req)
+        {error, missing_key} -> reply(400, #{error => <<"missing_key">>}, Req);
+        {error, invalid_key} -> reply(400, #{error => <<"invalid_key">>}, Req)
     end.
 
 -spec extract_key(cowboy_req:req()) -> {ok, string()} | {error, missing_key}.
@@ -261,9 +292,31 @@ extract_key(Req) ->
     %% written as {"key": "my key"} and read back as /store/my%20key
     %% resolve to the same entry. Splitting the raw path does not.
     case cowboy_req:binding(key, Req, <<>>) of
-        <<>> -> {error, missing_key};
-        Key -> {ok, binary_to_list(Key)}
+        <<>> ->
+            {error, missing_key};
+        Key ->
+            case valid_key(Key) of
+                true -> {ok, binary_to_list(Key)};
+                false -> {error, invalid_key}
+            end
     end.
+
+%% A key has to survive the round trip: the client reads it out of a
+%% response and puts it back in a path. Two things break that.
+%%
+%% Bytes that are not valid UTF-8 cannot be a JSON string, so jsx encodes
+%% them as U+FFFD -- /store/%FF and /store/%FE both reported the key as
+%% "�", and asking for that back was a third, missing key.
+%%
+%% Dot segments are removed by cowboy's router before a binding exists,
+%% so a key of "." or ".." was writable through the body form and then
+%% unreachable and undeletable through the path.
+-spec valid_key(binary()) -> boolean().
+valid_key(<<>>) -> false;
+valid_key(<<".">>) -> false;
+valid_key(<<"..">>) -> false;
+valid_key(Key) ->
+    is_binary(unicode:characters_to_binary(Key, utf8, utf8)).
 
 %% jsx:decode/2 raises on malformed input rather than returning an error,
 %% so every call has to be guarded or the handler crashes into a 500.
