@@ -16,7 +16,10 @@
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
--spec set(string(), any()) -> ok | {error, invalid_key}.
+%% Reports whether the key was created or overwritten, so the HTTP layer
+%% can answer 201 or 200 without a read-then-write across two calls --
+%% which would race, and defeat the point of serialising here.
+-spec set(string(), any()) -> {ok, created | updated} | {error, invalid_key}.
 set("", _Value) ->
     {error, invalid_key};
 set(Key, Value) ->
@@ -50,7 +53,11 @@ init([]) ->
     {ok, #{}}.
 
 handle_call({set, Key, Value}, _From, State) ->
-    {reply, ok, maps:put(Key, Value, State)};
+    Outcome = case maps:is_key(Key, State) of
+        true -> updated;
+        false -> created
+    end,
+    {reply, {ok, Outcome}, maps:put(Key, Value, State)};
 handle_call({get, Key}, _From, State) ->
     case maps:find(Key, State) of
         {ok, Value} -> {reply, {ok, Key, Value}, State};

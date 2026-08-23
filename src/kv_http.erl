@@ -159,9 +159,10 @@ store_from_body(Req) ->
                 {ok, #{<<"key">> := Key, <<"value">> := Value}} when is_binary(Key), Key /= <<>> ->
                     KeyStr = binary_to_list(Key),
                     case kv_store:set(KeyStr, Value) of
-                        ok ->
-                            reply(201, #{key => Key, value => Value,
-                                         status => <<"stored">>}, Req2);
+                        {ok, Outcome} ->
+                            reply(created_or_ok(Outcome),
+                                  #{key => Key, value => Value,
+                                    status => <<"stored">>}, Req2);
                         {error, invalid_key} ->
                             reply(400, #{error => <<"invalid_key">>}, Req2)
                     end;
@@ -185,9 +186,10 @@ store_with_key(Key, Req) ->
             case decode_json(Body) of
                 {ok, #{<<"value">> := Value}} ->
                     case kv_store:set(Key, Value) of
-                        ok ->
-                            reply(201, #{key => list_to_binary(Key), value => Value,
-                                         status => <<"stored">>}, Req2);
+                        {ok, Outcome} ->
+                            reply(created_or_ok(Outcome),
+                                  #{key => list_to_binary(Key), value => Value,
+                                    status => <<"stored">>}, Req2);
                         {error, invalid_key} ->
                             reply(400, #{error => <<"invalid_key">>}, Req2)
                     end;
@@ -202,6 +204,13 @@ store_with_key(Key, Req) ->
 %% ===================================================================
 %% Helper functions
 %% ===================================================================
+
+%% 201 only when the write actually created the key. RFC 7231 requires
+%% 200 or 204 when the target already had a representation, so a client
+%% can tell a create from an update by the status alone.
+-spec created_or_ok(created | updated) -> 201 | 200.
+created_or_ok(created) -> 201;
+created_or_ok(updated) -> 200.
 
 %% Run Fun with the path key, or answer 400 when the route carried none.
 -spec with_key(cowboy_req:req(), fun((string()) -> cowboy_req:req())) ->

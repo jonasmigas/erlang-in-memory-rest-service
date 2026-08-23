@@ -65,6 +65,8 @@ http_test_() ->
        fun health_trailing_slash/0},
       {"head answers wherever get does", fun head_mirrors_get/0},
       {"an unmatched path is a json 404", fun unmatched_path_is_json/0},
+      {"an overwrite is a 200, a first write a 201",
+       fun overwrite_is_not_created/0},
       {"stopping the listener child stops the listener",
        {timeout, 30, fun listener_restart/0}}
      ]}.
@@ -221,6 +223,24 @@ unmatched_path_is_json() ->
     %% and a missing key still reports as a missing key, not a bad path
     ?assertMatch({404, #{<<"error">> := <<"key_not_found">>}},
                  request(get, "/store/never_written_json")).
+
+overwrite_is_not_created() ->
+    %% Both POST and PUT answered 201 unconditionally, so a client using
+    %% the status to tell a create from an update always read "created".
+    %% kv_store:set/2 reports which it did, so the handler no longer has
+    %% to guess or read the key back first.
+    ?assertMatch({201, _}, request(put, "/store/twice", "{\"value\": \"one\"}")),
+    ?assertMatch({200, _}, request(put, "/store/twice", "{\"value\": \"two\"}")),
+    ?assertMatch({200, _}, request(post, "/store/twice", "{\"value\": \"three\"}")),
+    ?assertMatch({200, #{<<"value">> := <<"three">>}}, request(get, "/store/twice")),
+    %% the body-key form agrees
+    ?assertMatch({201, _},
+                 request(post, "/store", "{\"key\": \"body_twice\", \"value\": \"a\"}")),
+    ?assertMatch({200, _},
+                 request(post, "/store", "{\"key\": \"body_twice\", \"value\": \"b\"}")),
+    %% and deleting it makes the next write a create again
+    ?assertMatch({204, _}, request(delete, "/store/twice")),
+    ?assertMatch({201, _}, request(put, "/store/twice", "{\"value\": \"four\"}")).
 
 head_mirrors_get() ->
     %% HEAD used to fall to the method-not-allowed clause, so curl -I and

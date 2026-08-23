@@ -18,33 +18,33 @@ teardown(_) ->
 
 set_get_test() ->
     setup(),
-    ok = kv_store:set("test_key", "test_value"),
+    {ok, _} = kv_store:set("test_key", "test_value"),
     {ok, "test_key", "test_value"} = kv_store:get("test_key"),
     teardown(ok).
 
 set_get_integer_test() ->
     setup(),
-    ok = kv_store:set("number", 42),
+    {ok, _} = kv_store:set("number", 42),
     {ok, "number", 42} = kv_store:get("number"),
     teardown(ok).
 
 set_get_map_test() ->
     setup(),
     Value = #{name => <<"João">>, age => 30},
-    ok = kv_store:set("user", Value),
+    {ok, _} = kv_store:set("user", Value),
     {ok, "user", Value} = kv_store:get("user"),
     teardown(ok).
 
 set_get_list_test() ->
     setup(),
     Value = [1, 2, 3, 4, 5],
-    ok = kv_store:set("list", Value),
+    {ok, _} = kv_store:set("list", Value),
     {ok, "list", Value} = kv_store:get("list"),
     teardown(ok).
 
 delete_test() ->
     setup(),
-    ok = kv_store:set("delete_me", "value"),
+    {ok, _} = kv_store:set("delete_me", "value"),
     {ok, "delete_me", "value"} = kv_store:get("delete_me"),
     ok = kv_store:delete("delete_me"),
     {error, not_found} = kv_store:get("delete_me"),
@@ -57,8 +57,8 @@ delete_not_found_test() ->
 
 clear_all_test() ->
     setup(),
-    ok = kv_store:set("key1", "value1"),
-    ok = kv_store:set("key2", "value2"),
+    {ok, _} = kv_store:set("key1", "value1"),
+    {ok, _} = kv_store:set("key2", "value2"),
     {ok, "key1", "value1"} = kv_store:get("key1"),
     {ok, "key2", "value2"} = kv_store:get("key2"),
     kv_store:clear_all(),
@@ -68,9 +68,9 @@ clear_all_test() ->
 
 get_all_test() ->
     setup(),
-    ok = kv_store:set("a", 1),
-    ok = kv_store:set("b", 2),
-    ok = kv_store:set("c", 3),
+    {ok, _} = kv_store:set("a", 1),
+    {ok, _} = kv_store:set("b", 2),
+    {ok, _} = kv_store:set("c", 3),
     State = kv_store:get_all(),
     ?assertEqual(3, maps:size(State)),
     ?assertEqual(1, maps:get("a", State)),
@@ -93,8 +93,14 @@ invalid_key_test() ->
 %% Overwrite test
 overwrite_test() ->
     setup(),
-    ok = kv_store:set("key", "first"),
+    %% set/2 reports which of the two it did, so the HTTP layer can
+    %% answer 201 or 200 without reading the key back first -- a
+    %% read-then-write would race across two calls.
+    {ok, created} = kv_store:set("key", "first"),
     {ok, "key", "first"} = kv_store:get("key"),
-    ok = kv_store:set("key", "second"),
+    {ok, updated} = kv_store:set("key", "second"),
     {ok, "key", "second"} = kv_store:get("key"),
+    %% and a key that was deleted counts as created again
+    ok = kv_store:delete("key"),
+    {ok, created} = kv_store:set("key", "third"),
     teardown(ok).
