@@ -108,8 +108,9 @@ percent_encoded_key() ->
     ?assertEqual(<<"spaced">>, maps:get(<<"value">>, Body)).
 
 put_with_path_key() ->
-    %% PUT is documented alongside POST, but only POST was exercised, so
-    %% nothing caught the two drifting apart.
+    %% malformed_json/0 already drove PUT, but only into a 400. Nothing
+    %% covered a successful PUT write, so the two verbs could drift apart
+    %% on the happy path without a test noticing.
     ?assertMatch({201, _}, request(put, "/store/put_key", "{\"value\": \"via_put\"}")),
     {Status, Body} = request(get, "/store/put_key"),
     ?assertEqual(200, Status),
