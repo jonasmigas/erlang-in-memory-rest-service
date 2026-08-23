@@ -286,26 +286,23 @@ slow_body_is_a_timeout() ->
     %% too_large, but cowboy also answers {more, ...} when the read
     %% period expires. A client that stalled mid-body was told its
     %% handful of bytes exceeded 1MB, and the write was dropped.
-    ok = application:set_env(kv_store, body_deadline, 400),
+    %% Wide enough that ordinary scheduling jitter cannot look like the
+    %% deadline expiring -- at 400ms this flaked once, reporting a status
+    %% that was not 408 on a run that had changed nothing.
+    ok = application:set_env(kv_store, body_deadline, 1500),
     try
         {ok, Sock} = gen_tcp:connect({127, 0, 0, 1}, listen_port(),
                                      [binary, {active, false}, {packet, raw}]),
         %% headers promise 20 bytes; none of them ever follow
         ok = gen_tcp:send(Sock,
-             "POST /store/slowbody HTTP/1.1
-"
-             "Host: 127.0.0.1
-"
-             "Content-Type: application/json
-"
-             "Content-Length: 20
-"
-             "Connection: close
-
-"),
+             "POST /store/slowbody HTTP/1.1\r\n"
+             "Host: 127.0.0.1\r\n"
+             "Content-Type: application/json\r\n"
+             "Content-Length: 20\r\n"
+             "Connection: close\r\n\r\n"),
         {ok, Resp} = gen_tcp:recv(Sock, 0, 10000),
         gen_tcp:close(Sock),
-        ?assertMatch({match, _}, re:run(Resp, "^HTTP/1\.1 408 ")),
+        ?assertMatch({match, _}, re:run(Resp, "^HTTP/1\\.1 408 ")),
         ?assertMatch({match, _}, re:run(Resp, "request_timeout"))
     after
         ok = application:set_env(kv_store, body_deadline, 15000)
