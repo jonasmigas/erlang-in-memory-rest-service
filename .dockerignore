@@ -1,0 +1,18 @@
+# Keep the build context small and the image free of host artefacts.
+.git
+.githooks
+.gitattributes
+.gitignore
+.claude
+_build
+rebar3
+*.beam
+erl_crash.dump
+.rebar3
+
+# Build tooling and docs are never COPYed into the image.
+Dockerfile
+.dockerignore
+docker-compose.yml
+Makefile
+*.md
