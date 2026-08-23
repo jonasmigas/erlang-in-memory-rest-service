@@ -48,12 +48,14 @@ port() ->
 %% Routing
 %% ===================================================================
 
+%% The optional segment in "/store/[:key]" already matches /store and
+%% /store/ with the binding left unset, so a separate "/store" route
+%% would be a second dispatch entry the router never reaches.
 -spec dispatch() -> cowboy_router:dispatch_rules().
 dispatch() ->
     cowboy_router:compile([
         {'_', [
             {"/store/[:key]", ?MODULE, []},      %% GET, POST, PUT, DELETE
-            {"/store", ?MODULE, []},             %% POST (alternative)
             {"/health", ?MODULE, []}             %% Health check
         ]}
     ]).
@@ -98,28 +100,22 @@ handle_request(<<"GET">>, _Path, Req, State) ->
             {reply(400, Response, Req), State}
     end;
 
-handle_request(<<"POST">>, <<"/store">>, Req, State) ->
-    %% POST /store with JSON body: {"key": "mykey", "value": "myvalue"}
-    handle_post(Req, State);
-
-handle_request(<<"POST">>, Path, Req, State) when Path =:= <<"/store/">> orelse Path =:= <<"/store/ ">> ->
-    handle_post(Req, State);
-
+%% POST /store/{key} with {"value": ...}, or POST /store with the key in
+%% the body. /store and /store/ both arrive here with no :key binding, so
+%% the fallback covers them without matching path literals.
 handle_request(<<"POST">>, _Path, Req, State) ->
-    %% POST /store/{key} with JSON body: {"value": "myvalue"}
     case extract_key(Req) of
         {ok, Key} ->
-            handle_post_with_key(Key, Req, State);
+            store_with_key(Key, Req, State);
         {error, missing_key} ->
-            %% Try to read from body instead
-            handle_post(Req, State)
+            store_from_body(Req, State)
     end;
 
 handle_request(<<"PUT">>, _Path, Req, State) ->
     %% PUT /store/{key} with JSON body: {"value": "myvalue"}
     case extract_key(Req) of
         {ok, Key} ->
-            handle_put(Key, Req, State);
+            store_with_key(Key, Req, State);
         {error, missing_key} ->
             Response = jsx:encode(#{error => <<"key_required_in_path">>}),
             {reply(400, Response, Req), State}
@@ -150,10 +146,11 @@ handle_request(_, _, Req, State) ->
     {reply(405, Response, Req), State}.
 
 %% ===================================================================
-%% Helper functions for handling POST/PUT
+%% Helper functions for storing a value
 %% ===================================================================
 
-handle_post(Req, State) ->
+%% The key comes from the body: {"key": "mykey", "value": "myvalue"}.
+store_from_body(Req, State) ->
     case read_body(Req) of
         {ok, Body, Req2} ->
             case decode_json(Body) of
@@ -183,7 +180,10 @@ handle_post(Req, State) ->
             {reply(400, Response, Req), State}
     end.
 
-handle_post_with_key(Key, Req, State) when is_list(Key), Key /= [] ->
+%% The key came from the path, so the body carries only {"value": ...}.
+%% extract_key/1 never yields an empty key, so there is no empty-key clause
+%% here; kv_store:set/2 still reports invalid_key as part of its contract.
+store_with_key(Key, Req, State) ->
     case read_body(Req) of
         {ok, Body, Req2} ->
             case decode_json(Body) of
@@ -206,17 +206,7 @@ handle_post_with_key(Key, Req, State) when is_list(Key), Key /= [] ->
         {error, _} ->
             Response = jsx:encode(#{error => <<"bad_request">>}),
             {reply(400, Response, Req), State}
-    end;
-handle_post_with_key(_Key, Req, State) ->
-    Response = jsx:encode(#{error => <<"invalid_key">>}),
-    {reply(400, Response, Req), State}.
-
-handle_put(Key, Req, State) when is_list(Key), Key /= [] ->
-    %% PUT is handled the same as POST with key in path
-    handle_post_with_key(Key, Req, State);
-handle_put(_Key, Req, State) ->
-    Response = jsx:encode(#{error => <<"invalid_key">>}),
-    {reply(400, Response, Req), State}.
+    end.
 
 %% ===================================================================
 %% Helper functions
@@ -262,13 +252,11 @@ reply(StatusCode, Req) ->
         <<"content-type">> => <<"application/json">>
     }, Req).
 
--spec reply(integer(), binary() | map(), cowboy_req:req()) -> cowboy_req:req().
+-spec reply(integer(), binary(), cowboy_req:req()) -> cowboy_req:req().
 reply(StatusCode, Body, Req) when is_binary(Body) ->
     cowboy_req:reply(StatusCode, #{
         <<"content-type">> => <<"application/json">>
-    }, Body, Req);
-reply(StatusCode, Body, Req) when is_map(Body) ->
-    reply(StatusCode, jsx:encode(Body), Req).
+    }, Body, Req).
 
 -spec terminate(term(), cowboy_req:req(), any()) -> ok.
 terminate(_Reason, _Req, _State) ->

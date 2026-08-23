@@ -34,6 +34,11 @@ http_test_() ->
       {"a cleared key reads as if never set", fun cleared_matches_never_set/0},
       {"malformed JSON is a 400, not a crash", fun malformed_json/0},
       {"a percent-encoded path key names the same entry", fun percent_encoded_key/0},
+      {"put writes a key the same way post does", fun put_with_path_key/0},
+      {"the keyless routes still take the key from the body",
+       fun keyless_routes_read_the_body/0},
+      {"a request with no key at all is a 400", fun no_key_anywhere/0},
+      {"an unsupported method is a 405", fun unsupported_method/0},
       {"stopping the listener child stops the listener",
        {timeout, 30, fun listener_restart/0}}
      ]}.
@@ -102,6 +107,44 @@ percent_encoded_key() ->
     ?assertEqual(<<"my key">>, maps:get(<<"key">>, Body)),
     ?assertEqual(<<"spaced">>, maps:get(<<"value">>, Body)).
 
+put_with_path_key() ->
+    %% PUT is documented alongside POST, but only POST was exercised, so
+    %% nothing caught the two drifting apart.
+    ?assertMatch({201, _}, request(put, "/store/put_key", "{\"value\": \"via_put\"}")),
+    {Status, Body} = request(get, "/store/put_key"),
+    ?assertEqual(200, Status),
+    ?assertEqual(<<"via_put">>, maps:get(<<"value">>, Body)).
+
+keyless_routes_read_the_body() ->
+    %% /store and /store/ both reach the handler with no :key binding and
+    %% must fall back to the key in the body. These used to be matched by
+    %% path literals -- one of them <<"/store/ ">>, with a space, which no
+    %% request can produce -- rather than by the absent binding.
+    ?assertMatch({201, _},
+                 request(post, "/store", "{\"key\": \"no_slash\", \"value\": \"a\"}")),
+    ?assertMatch({201, _},
+                 request(post, "/store/", "{\"key\": \"trailing_slash\", \"value\": \"b\"}")),
+    ?assertMatch({200, #{<<"value">> := <<"a">>}}, request(get, "/store/no_slash")),
+    ?assertMatch({200, #{<<"value">> := <<"b">>}}, request(get, "/store/trailing_slash")).
+
+no_key_anywhere() ->
+    %% No key in the path and none in the body is a client error, not a
+    %% crash and not a silent write.
+    {GetStatus, GetBody} = request(get, "/store"),
+    ?assertEqual(400, GetStatus),
+    ?assertEqual(<<"missing_key">>, maps:get(<<"error">>, GetBody)),
+    ?assertMatch({400, _}, request(get, "/store/")),
+    ?assertMatch({400, _}, request(delete, "/store")),
+    {PutStatus, PutBody} = request(put, "/store", "{\"value\": \"nowhere\"}"),
+    ?assertEqual(400, PutStatus),
+    ?assertEqual(<<"key_required_in_path">>, maps:get(<<"error">>, PutBody)),
+    ?assertMatch({400, _}, request(post, "/store", "{\"value\": \"keyless\"}")).
+
+unsupported_method() ->
+    {Status, Body} = request(options, "/store/anything"),
+    ?assertEqual(405, Status),
+    ?assertEqual(<<"method_not_allowed">>, maps:get(<<"error">>, Body)).
+
 listener_restart() ->
     ?assertMatch({201, _}, request(post, "/store/survivor", "{\"value\": \"alive\"}")),
     StorePid = whereis(kv_store),
@@ -168,7 +211,9 @@ listener_state() ->
 request(get, Path) ->
     do_request(get, {base() ++ Path, []});
 request(delete, Path) ->
-    do_request(delete, {base() ++ Path, []}).
+    do_request(delete, {base() ++ Path, []});
+request(options, Path) ->
+    do_request(options, {base() ++ Path, []}).
 
 request(post, Path, Body) ->
     do_request(post, {base() ++ Path, [], "application/json", Body});
