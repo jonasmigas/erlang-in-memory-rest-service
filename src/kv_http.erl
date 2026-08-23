@@ -124,14 +124,16 @@ handle_request(store, <<"GET">>, Req) ->
 handle_request(store, <<"POST">>, Req) ->
     case extract_key(Req) of
         {ok, Key} -> store_with_key(Key, Req);
-        {error, missing_key} -> store_from_body(Req)
+        {error, missing_key} -> store_from_body(Req);
+        {error, invalid_key} -> reply(400, #{error => <<"invalid_key">>}, Req)
     end;
 
 handle_request(store, <<"PUT">>, Req) ->
     %% PUT /store/{key} with JSON body: {"value": "myvalue"}
     case extract_key(Req) of
         {ok, Key} -> store_with_key(Key, Req);
-        {error, missing_key} -> reply(400, #{error => <<"key_required_in_path">>}, Req)
+        {error, missing_key} -> reply(400, #{error => <<"key_required_in_path">>}, Req);
+        {error, invalid_key} -> reply(400, #{error => <<"invalid_key">>}, Req)
     end;
 
 handle_request(store, <<"DELETE">>, Req) ->
@@ -162,18 +164,8 @@ store_from_body(Req) ->
     case read_body(Req) of
         {ok, Body, Req2} ->
             case decode_json(Body) of
-                {ok, #{<<"key">> := Key, <<"value">> := Value}} when is_binary(Key), Key /= <<>> ->
-                    KeyStr = binary_to_list(Key),
-                    case call_store(fun() -> kv_store:set(KeyStr, Value) end) of
-                        {ok, Outcome} ->
-                            reply(created_or_ok(Outcome),
-                                  #{key => Key, value => Value,
-                                    status => <<"stored">>}, Req2);
-                        {error, invalid_key} ->
-                            reply(400, #{error => <<"invalid_key">>}, Req2);
-                        {error, unavailable} ->
-                            unavailable(Req2)
-                    end;
+                {ok, #{<<"key">> := Key, <<"value">> := Value}} when is_binary(Key) ->
+                    store_body_key(Key, Value, Req2);
                 {ok, #{<<"key">> := Key}} when is_binary(Key) ->
                     %% Missing value
                     reply(400, #{error => <<"missing_value">>}, Req2);
@@ -189,9 +181,29 @@ store_from_body(Req) ->
             reply(400, #{error => <<"bad_request">>}, Req)
     end.
 
+%% A key out of the body faces the same round-trip rule as one out of
+%% the path -- the client will read it back from the response and put it
+%% in a URL either way.
+store_body_key(Key, Value, Req) ->
+    case valid_key(Key) of
+        false ->
+            reply(400, #{error => <<"invalid_key">>}, Req);
+        true ->
+            case call_store(fun() -> kv_store:set(binary_to_list(Key), Value) end) of
+                {ok, Outcome} ->
+                    reply(created_or_ok(Outcome),
+                          #{key => Key, value => Value,
+                            status => <<"stored">>}, Req);
+                {error, invalid_key} ->
+                    reply(400, #{error => <<"invalid_key">>}, Req);
+                {error, unavailable} ->
+                    unavailable(Req)
+            end
+    end.
+
 %% The key came from the path, so the body carries only {"value": ...}.
-%% extract_key/1 never yields an empty key, so there is no empty-key
-%% clause here.
+%% extract_key/1 has already rejected anything unusable, so there is no
+%% empty-key or invalid-key clause here.
 store_with_key(Key, Req) ->
     case read_body(Req) of
         {ok, Body, Req2} ->
@@ -252,7 +264,8 @@ unavailable(Req) ->
 with_key(Req, Fun) ->
     case extract_key(Req) of
         {ok, Key} -> Fun(Key);
-        {error, missing_key} -> reply(400, #{error => <<"missing_key">>}, Req)
+        {error, missing_key} -> reply(400, #{error => <<"missing_key">>}, Req);
+        {error, invalid_key} -> reply(400, #{error => <<"invalid_key">>}, Req)
     end.
 
 -spec extract_key(cowboy_req:req()) -> {ok, string()} | {error, missing_key}.
@@ -261,10 +274,34 @@ extract_key(Req) ->
     %% written as {"key": "my key"} and read back as /store/my%20key
     %% resolve to the same entry. Splitting the raw path does not.
     case cowboy_req:binding(key, Req, <<>>) of
-        <<>> -> {error, missing_key};
-        Key -> {ok, binary_to_list(Key)}
+        <<>> ->
+            {error, missing_key};
+        Key ->
+            case valid_key(Key) of
+                true -> {ok, binary_to_list(Key)};
+                false -> {error, invalid_key}
+            end
     end.
 
+%% A key has to survive the round trip: the client reads it out of a
+%% response and puts it back in a path. Two things break that.
+%%
+%% Bytes that are not valid UTF-8 cannot be a JSON string, so jsx encodes
+%% them as U+FFFD -- /store/%FF and /store/%FE both reported the key as
+%% "�", and asking for that back was a third, missing key.
+%%
+%% Dot segments are removed by cowboy's router before a binding exists,
+%% so a key of "." or ".." was writable through the body form and then
+%% unreachable and undeletable through the path.
+-spec valid_key(binary()) -> boolean().
+valid_key(<<>>) -> false;
+valid_key(<<".">>) -> false;
+valid_key(<<"..">>) -> false;
+valid_key(Key) ->
+    is_binary(unicode:characters_to_binary(Key, utf8, utf8)).
+
+%% jsx:decode/2 raises on malformed input rather than returning an error,
+%% so every call has to be guarded or the handler crashes into a 500.
 %% jsx:decode/2 raises on malformed input rather than returning an error,
 %% so every call has to be guarded or the handler crashes into a 500.
 -spec decode_json(binary()) -> {ok, jsx:json_term()} | {error, invalid_json}.

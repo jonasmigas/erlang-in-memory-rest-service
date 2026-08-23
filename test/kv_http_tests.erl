@@ -76,6 +76,7 @@ http_test_() ->
       {"a body that never arrives is a 408, not a 413",
        {timeout, 30, fun slow_body_is_a_timeout/0}},
       {"a body over the cap is still a 413", {timeout, 30, fun oversized_body/0}},
+      {"a key that cannot round-trip is rejected", fun unusable_keys/0},
       {"stopping the listener child stops the listener",
        {timeout, 30, fun listener_restart/0}}
      ]}.
@@ -317,6 +318,29 @@ oversized_body() ->
     ?assertMatch({413, #{<<"error">> := <<"request_too_large">>}},
                  request(put, "/store/toobig", binary_to_list(Body))),
     ?assertMatch({404, _}, request(get, "/store/toobig")).
+
+unusable_keys() ->
+    %% A client reads a key out of a response and puts it back in a URL.
+    %% These cannot survive that, so storing them only produces an entry
+    %% nobody can name.
+
+    %% Not valid UTF-8: jsx encodes it as U+FFFD, so /store/%FF and
+    %% /store/%FE both reported the same key, and asking for that back
+    %% was a third key that did not exist.
+    ?assertMatch({400, #{<<"error">> := <<"invalid_key">>}},
+                 request(put, "/store/%FF", "{\"value\": \"raw\"}")),
+    ?assertMatch({400, _}, request(get, "/store/%FE")),
+
+    %% Dot segments: cowboy removes these before a binding exists, so
+    %% the entry was writable through the body and then unreachable and
+    %% undeletable through the path.
+    ?assertMatch({400, #{<<"error">> := <<"invalid_key">>}},
+                 request(post, "/store", "{\"key\": \"..\", \"value\": \"v\"}")),
+    ?assertMatch({400, _}, request(post, "/store", "{\"key\": \".\", \"value\": \"v\"}")),
+
+    %% An empty key names the empty key, not a missing value.
+    ?assertMatch({400, #{<<"error">> := <<"invalid_key">>}},
+                 request(post, "/store", "{\"key\": \"\", \"value\": \"v\"}")).
 
 head_mirrors_get() ->
     %% HEAD used to fall to the method-not-allowed clause, so curl -I and
