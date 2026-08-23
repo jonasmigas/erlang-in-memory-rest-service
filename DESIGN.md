@@ -61,14 +61,10 @@ The KV Store is built using Erlang/OTP with three main components:
 
 ### Endpoints
 
-| Operation | Method | Endpoint | Request Body | Response |
-|-----------|--------|----------|--------------|----------|
-| Store | POST | `/store` | `{"key": "k", "value": "v"}` | `201` with stored value |
-| Store | POST | `/store/{key}` | `{"value": "v"}` | `201` with stored value |
-| Store | PUT | `/store/{key}` | `{"value": "v"}` | `201` with stored value |
-| Retrieve | GET | `/store/{key}` | (none) | `200` with `{"key":"k","value":"v"}` or `404` |
-| Delete | DELETE | `/store/{key}` | (none) | `204 No Content` or `404` |
-| Health | GET | `/health` | (none) | `200` with `{"status":"ok"}` |
+The endpoint reference -- methods, request bodies, and success and error
+status codes -- lives in the [README](README.md#api), which is the single
+source of truth for the API surface. This section covers why it is shaped
+that way.
 
 ### Why Path Parameters?
 
