@@ -13,8 +13,10 @@ A simple in-memory key-value store with a REST API, built in Erlang using OTP an
 
 ## Requirements
 
-- Docker and Docker Compose. Everything below runs inside a container, so no
-  local Erlang/OTP or rebar3 install is needed.
+- Docker, and Docker Compose v2 (the `docker compose` subcommand; the file
+  omits the obsolete `version:` key, which Compose v1 cannot parse).
+  Everything below runs inside a container, so no local Erlang/OTP or rebar3
+  install is needed.
 - `make` is optional but assumed by the commands below; each target is a
   one-line docker command you can run directly instead.
 
@@ -35,10 +37,10 @@ container).
 |--------|--------------|
 | `make build` | Build the dev image |
 | `make test` | Run the EUnit suite |
-| `make shell` | Open a `rebar3 shell` with the app started |
-| `make up` / `make down` | Start / stop the service |
+| `make shell` | Open a `rebar3 shell` with the app started (no published port, so it works alongside `make up`) |
+| `make up` / `make down` | Start the service and wait until it is healthy / stop it |
 | `make logs` | Follow the service logs |
-| `make health` | `curl /health` on the running service |
+| `make health` | Ask the running service for `/health` |
 | `make release` | Build the production release image |
 | `make release-run` | Run that image in the foreground |
 | `make clean` | Stop everything, drop images and cached builds |
@@ -59,18 +61,33 @@ make release-run  # runs it on http://localhost:18080
 
 The runtime image is the release and nothing else -- no rebar3, no compiler,
 no sources -- running as a non-root user with a `HEALTHCHECK` on `/health`.
-It is roughly 20 MB against roughly 370 MB for the dev image.
+It is roughly 22 MB against roughly 81 MB for the dev image.
+
+Erlang distribution is confined to loopback and the node cookie is generated
+per container at first boot, so the release exposes only the HTTP port.
 
 To build a release outside Docker, with Erlang/OTP 26 and rebar3 on the host:
 
 ```bash
-rebar3 as prod tar   # _build/prod/rel/kv_store/kv_store-0.1.0.tar.gz
-rebar3 release       # development release under _build/default/rel/kv_store
-rebar3 shell         # REPL with the app started, on port 8080
+rebar3 as prod release  # _build/prod/rel/kv_store, ERTS included
+rebar3 as prod tar      # the same tree, packaged as a tarball
+rebar3 release          # development release under _build/default/rel
+rebar3 shell            # REPL with the app started, on port 8080
 ```
 
-The listen port comes from `config/sys.config`; VM flags are in
-`config/vm.args`.
+VM flags are in `config/vm.args`. The listen port defaults to
+`config/sys.config`, but the runtime image passes `-kv_store port $APP_PORT`,
+so `APP_PORT` drives the bind, the `EXPOSE` and the health probe together:
+
+```bash
+docker run --rm -e APP_PORT=9099 -p 9099:9099 kv_store:latest
+```
+
+On the host side, `HOST_PORT` sets the published port for every make target:
+
+```bash
+make up HOST_PORT=19090
+```
 
 ## API
 
