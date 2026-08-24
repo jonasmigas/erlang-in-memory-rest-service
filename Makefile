@@ -11,7 +11,7 @@ HOST_PORT     ?= 18080
 export HOST_PORT
 
 .DEFAULT_GOAL := help
-.PHONY: help build test cover dialyzer bench shell up down logs health release smoke release-run clean
+.PHONY: help build test cover dialyzer bench bench-http shell up down logs health release smoke release-run clean
 
 help:
 	@echo "make build        Build the dev image"
@@ -19,6 +19,7 @@ help:
 	@echo "make cover        Run the suite and report line coverage"
 	@echo "make dialyzer     Check the specs in src/ against the code"
 	@echo "make bench        Compare the ETS read path against a gen_server"
+	@echo "make bench-http   Measure requests per second through cowboy"
 	@echo "make shell        Open a rebar3 shell with the app started"
 	@echo "make up           Start the service and wait for it to be healthy"
 	@echo "make down         Stop the service"
@@ -60,6 +61,13 @@ cover: build
 # test`: it takes a while and it measures, it does not assert.
 bench: build
 	$(COMPOSE) run --rm $(SERVICE) sh -c 'rebar3 as bench compile && erl -pa _build/bench/lib/kv_store/ebin _build/bench/lib/kv_store/bench _build/bench/lib/*/ebin -noshell -eval "kv_bench:main(), halt()."'
+
+# Every other measurement here calls kv_store directly and skips the HTTP
+# stack entirely. This one drives the real listener over persistent
+# connections, so the gap between what the store can do and what the
+# service serves is a number rather than an assumption.
+bench-http: build
+	$(COMPOSE) run --rm $(SERVICE) sh -c 'rebar3 as bench compile && erl -pa _build/bench/lib/kv_store/ebin _build/bench/lib/kv_store/bench _build/bench/lib/*/ebin -noshell -eval "kv_bench_http:main()."'
 
 # No --service-ports: publishing the service port here fails outright while
 # `make up` holds it. Use `make up` when you want the API reachable.
