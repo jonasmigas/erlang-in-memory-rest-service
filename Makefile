@@ -11,11 +11,12 @@ HOST_PORT     ?= 18080
 export HOST_PORT
 
 .DEFAULT_GOAL := help
-.PHONY: help build test shell up down logs health release smoke release-run clean
+.PHONY: help build test bench shell up down logs health release smoke release-run clean
 
 help:
 	@echo "make build        Build the dev image"
 	@echo "make test         Run the EUnit suite"
+	@echo "make bench        Compare the ETS read path against a gen_server"
 	@echo "make shell        Open a rebar3 shell with the app started"
 	@echo "make up           Start the service and wait for it to be healthy"
 	@echo "make down         Stop the service"
@@ -34,6 +35,12 @@ build:
 # tested against the previous image.
 test: build
 	$(COMPOSE) run --rm $(SERVICE) rebar3 eunit
+
+# Compares reading from ETS against reading through a gen_server, both in
+# one VM and alternating, so host noise lands on both. Not part of `make
+# test`: it takes a while and it measures, it does not assert.
+bench: build
+	$(COMPOSE) run --rm $(SERVICE) sh -c 'rebar3 as bench compile && erl -pa _build/bench/lib/kv_store/ebin _build/bench/lib/kv_store/bench _build/bench/lib/*/ebin -noshell -eval "kv_bench:main(), halt()."'
 
 # No --service-ports: publishing the service port here fails outright while
 # `make up` holds it. Use `make up` when you want the API reachable.

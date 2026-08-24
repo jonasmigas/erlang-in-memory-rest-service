@@ -87,40 +87,67 @@ each other, and `read_concurrency` lets them run on multiple schedulers.
 
 ### What is measured
 
-Reads survive a store that is wedged. `kv_http_tests` suspends the
-GenServer with `sys:suspend/1` and asserts that reads keep answering
-`200` while writes report `503 store_unavailable`. Before this change
-every verb timed out. `kv_store_tests` covers the other end: with no
-store running at all, `get/1` returns `{error, unavailable}` rather than
+`make bench` compares the two read paths. Both run in one VM and are
+measured alternately inside each round, so a slow moment on the host lands
+on both; what it reports is the ratio, which survives that, and the median
+of several rounds with the spread printed beside it. On this machine, four
+schedulers:
+
+| readers | ETS ops/s | gen_server ops/s | ratio |
+|---------|-----------|------------------|-------|
+| 1       | ~3.4M     | ~0.3M            | ~10x  |
+| 2       | ~5.0M     | ~0.36M           | ~13x  |
+| 4       | ~8.7M     | ~0.44M           | ~19x  |
+| 8       | ~9.5M     | ~0.53M           | ~18x  |
+
+The ratio is not the interesting part. This is: adding readers multiplies
+ETS throughput by about 2.8-3.3x across four cores, and the gen_server by
+about 1.5x. One process handles one message at a time, so its total is
+close to flat no matter how many callers arrive — which is the whole
+argument, in a measurement rather than in prose.
+
+Availability, which is the reason the change was made: `kv_http_tests`
+suspends the GenServer with `sys:suspend/1` and asserts reads keep
+answering `200` while writes report `503 store_unavailable`. Before this
+change every verb timed out. `kv_store_tests` covers the other end — with
+no store running at all, `get/1` returns `{error, unavailable}` rather than
 crashing its caller.
 
 Correctness under load: 300 concurrent writes followed by 300 concurrent
 reads return 300/300 correct values, no 5xx.
 
-### What is not measured, and why
+### What is not measured
 
-The throughput argument — that reads should now use more than one core —
-is the usual reason for this change and is very likely true. It is not
-claimed here as a number.
+Absolute ops/s here means very little: this is one laptop running Docker
+Desktop, and the spread column shows rounds varying by a third. Treat the
+ratios and the scaling shape as the result and the raw figures as
+illustration. A number worth quoting to anyone would come off a quiet
+Linux host.
 
-Benchmarking was attempted on Docker Desktop for Windows and abandoned:
-identical configurations varied roughly threefold between runs (one
-measurement of the same read loop ranged from 65k to 197k ops/s). Nothing
-honest can be concluded from differences smaller than that spread. A
-figure would need a quiet Linux host and a load generator that is not
-spawning a process per request.
+The first attempt at this measurement was thrown away twice, which is worth
+recording because both failures are easy to repeat. Measuring the two
+designs in separate runs put host noise between them, and it was wider than
+the effect. Then `erl -pa _build/...` ran against beams the `_build` volume
+had cached from the previous implementation, so both sides of the
+comparison were secretly the same code — and duly measured the same. That
+is the hazard the README warns about under `make clean`, walked into
+anyway. `make bench` recompiles before it measures.
 
 ### What this does not fix
 
 A large value is still copied to whoever reads it. Moving the read out of
 the GenServer moved where the copy happens, not whether it happens: one
 client pulling a multi-megabyte entry still consumes CPU and allocator
-bandwidth that every other request needs. Measured on this setup, small-key
-reads degraded by a similar proportion with and without the change.
+bandwidth every other request needs.
 
-If that mattered, the fix is not more concurrency — it is not storing
-values large enough to care about, or handing back a reference rather than
-a copy.
+Measured — one client looping over a 4MB value while small-key reads run
+alongside — throughput retained is about 54% with ETS and about 45%
+through the GenServer. Better, but both lose roughly half, so this is not
+the fix for that problem.
+
+If it mattered, the answer is not more concurrency. It is not storing
+values large enough to care about, or handing back a reference instead of a
+copy.
 
 ### Durability
 

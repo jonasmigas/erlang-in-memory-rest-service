@@ -39,6 +39,7 @@ container).
 |--------|--------------|
 | `make build` | Build the dev image |
 | `make test` | Run the EUnit suite |
+| `make bench` | Compare the ETS read path against a gen_server (see [DESIGN](DESIGN.md#concurrency)) |
 | `make shell` | Open a `rebar3 shell` with the app started (no published port, so it works alongside `make up`) |
 | `make up` / `make down` | Start the service and wait until it is healthy / stop it |
 | `make logs` | Follow the service logs |
