@@ -1,0 +1,65 @@
+name: CI
+
+# Everything here goes through the Makefile, which goes through Docker, so CI
+# runs the same toolchain a developer runs -- the pinned OTP 26 image and its
+# rebar3 -- rather than a second one installed alongside it that could pass
+# while the real build fails.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: Test and build the release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run the EUnit suite
+        run: make test
+
+      # The suite passes in rebar3's default order because that order happens
+      # to be the safe one: kv_store_tests leaves a store registered, and
+      # kv_http_tests has to clear it without killing the runner. Run the other
+      # order too, so a rename or a new module cannot quietly reintroduce that.
+      - name: Run the suite in the reverse module order
+        run: docker compose run --rm kv_store rebar3 eunit --module=kv_store_tests,kv_http_tests
+
+      # `make release` builds the runtime stage and then boots the image and
+      # asks it for /health, so this also covers the failure the tests cannot
+      # see: a release that compiles and cannot start.
+      - name: Build the release image and smoke-test it
+        run: make release
+
+  commit-messages:
+    name: Commit messages
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Reuse the hook rather than restating its rules here. A second copy of
+      # the format would drift from .githooks/commit-msg, and then CI and a
+      # local commit would disagree about what is valid.
+      - name: Check each commit against .githooks/commit-msg
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          status=0
+          for sha in $(git rev-list "$BASE"..HEAD); do
+            git log -1 --format=%B "$sha" > "$RUNNER_TEMP/msg"
+            if ! sh .githooks/commit-msg "$RUNNER_TEMP/msg"; then
+              printf '  ^ in commit %s: %s\n' \
+                "$(git log -1 --format=%h "$sha")" \
+                "$(git log -1 --format=%s "$sha")" >&2
+              status=1
+            fi
+          done
+          exit $status
