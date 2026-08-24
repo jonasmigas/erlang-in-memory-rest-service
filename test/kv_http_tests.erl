@@ -87,7 +87,11 @@ http_test_() ->
       {"a body with no value says so, either way",
        fun missing_value_agrees/0},
       {"stopping the listener child stops the listener",
-       {timeout, 30, fun listener_restart/0}}
+       {timeout, 30, fun listener_restart/0}},
+      %% Last on purpose: it takes the store down and back up, which
+      %% empties the table every earlier test has been writing to.
+      {"the health check reports the store, not the listener",
+       {timeout, 30, fun health_reports_the_store/0}}
      ]}.
 
 setup() ->
@@ -331,8 +335,11 @@ store_unavailable() ->
                      request(put, "/store/frozen", "{\"value\": \"w\"}")),
         ?assertMatch({503, _}, request(post, "/store", "{\"key\": \"f\", \"value\": 1}")),
         ?assertMatch({503, _}, request(delete, "/store/frozen")),
-        %% /health does not touch the store, so it keeps answering --
-        %% which is worth knowing about, not asserting as desirable
+        %% /health asks kv_store:ready/0, which a suspended process still
+        %% satisfies: it is registered and its table is there. So the probe
+        %% catches a store that is gone and not one that is wedged, which
+        %% is the documented trade -- checking for wedged means calling
+        %% into the mailbox this test has deliberately blocked.
         ?assertMatch({200, _}, request(get, "/health"))
     after
         ok = sys:resume(Pid),
@@ -451,6 +458,25 @@ health_trailing_slash() ->
     {Status, Body} = request(get, "/health/"),
     ?assertEqual(200, Status),
     ?assertEqual(<<"ok">>, maps:get(<<"status">>, Body)).
+
+%% The listener answering at all proves the listener is up, which is the
+%% one thing a probe does not need to be told. With the store terminated
+%% the node cannot serve a single key, and the probe has to say so --
+%% otherwise an orchestrator keeps sending traffic to a node whose every
+%% write is a 503.
+health_reports_the_store() ->
+    ?assertMatch({200, #{<<"status">> := <<"ok">>}}, request(get, "/health")),
+    ok = supervisor:terminate_child(kv_store_sup, kv_store),
+    try
+        {Status, Body} = request(get, "/health"),
+        ?assertEqual(503, Status),
+        ?assertEqual(<<"store_unavailable">>, maps:get(<<"error">>, Body)),
+        %% and the store route agrees, rather than the two disagreeing
+        ?assertMatch({503, _}, request(get, "/store/anything"))
+    after
+        {ok, _} = supervisor:restart_child(kv_store_sup, kv_store)
+    end,
+    ?assertMatch({200, #{<<"status">> := <<"ok">>}}, request(get, "/health")).
 
 listener_restart() ->
     ?assertMatch({201, _}, request(post, "/store/survivor", "{\"value\": \"alive\"}")),
