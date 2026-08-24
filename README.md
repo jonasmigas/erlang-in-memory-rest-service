@@ -208,6 +208,7 @@ beside it that could pass while the real build fails.
 |-----|----------------|
 | `make test` | the suite, and `warnings_as_errors` at compile time |
 | the reverse module order | the suite passes in rebar3's default order because that order happens to be the safe one; this stops a rename quietly reintroducing the fixture bug |
+| the bench profile | `bench/` is compiled by no other step, so a harness could rot until a reviewer ran it |
 | `make release` | a release that compiles but cannot boot -- the target ends by starting the image and asking it for `/health` |
 | commit messages | each commit in a pull request, by running `.githooks/commit-msg` itself rather than restating its rules |
 
