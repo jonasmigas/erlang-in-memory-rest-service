@@ -108,19 +108,26 @@ on both; what it reports is the ratio, which survives that, and the median
 of several rounds with the spread printed beside it. On this machine, four
 schedulers:
 
-| readers | ETS ops/s | gen_server ops/s | ratio |
-|---------|-----------|------------------|-------|
-| 1       | ~3.4M     | ~0.3M            | ~10x  |
-| 2       | ~5.0M     | ~0.36M           | ~13x  |
-| 4       | ~8.7M     | ~0.44M           | ~19x  |
-| 8       | ~9.5M     | ~0.53M           | ~18x  |
+| readers | ETS ops/s   | gen_server ops/s | ratio       |
+|---------|-------------|------------------|-------------|
+| 1       | 1.3M - 3.7M | 145k - 367k      | 9.2x - 11.3x  |
+| 2       | 2.3M - 6.3M | 143k - 396k      | 15.5x - 17.2x |
+| 4       | 6.0M - 9.0M | 282k - 442k      | 17.2x - 20.1x |
+| 8       | 6.5M - 11.5M | 340k - 559k     | 19.0x - 21.8x |
 
-The ratio is not the interesting part. This is: adding readers multiplies
-ETS throughput by roughly 2.3 to 3.8x across four cores depending on the
-run, and the gen_server by about 1.5x at best and sometimes less than
-one. One process handles one message at
-a time, so its total is close to flat no matter how many callers arrive —
-which is the whole argument, in a measurement rather than in prose.
+Each cell is the range of the per-run medians over three runs. They are
+wide, and the rounds inside them are wider: four readers have spanned 2.6M
+to 10.7M within one run. An earlier version of this table gave one figure
+per cell, and a later run on the same machine reproduced almost none of
+them.
+
+The ratio is not the interesting part. This is: going from one reader to
+eight multiplies ETS throughput by 2.9 to 4.8x across four cores depending
+on the run, and the gen_server by 1.2 to 2.3x. Every run agrees on the
+direction even where the figures disagree by a factor of three -- one
+process handles one message at a time, so its total flattens no matter how
+many callers arrive, and the table it is being compared against does not.
+That is the whole argument, in a measurement rather than in prose.
 
 Run it and the figures will differ; the shape is what reproduces.
 
@@ -205,9 +212,9 @@ Set beside the in-process numbers, the gap is the whole point:
 | | in kv_store | through HTTP | ratio |
 |---|---|---|---|
 | reads  | ~9M ops/s   | ~22k req/s | ~400x |
-| writes | ~460k ops/s | ~17k req/s | ~27x  |
+| writes | ~290k ops/s | ~17k req/s | ~17x  |
 
-**The store is not the constraint. The HTTP layer is -- by 27x on writes
+**The store is not the constraint. The HTTP layer is -- by 17x on writes
 and 400x on reads.** Everything the concurrency work above achieved --
 reads that scale across cores, a write path that does not queue behind
 reads -- is real and is invisible from outside, because the request never
@@ -221,8 +228,8 @@ this level. It is a small trace: the path that serialises every write comes
 within about a quarter of the path that serialises nothing, because the
 socket, the parsing and the JSON dominate both. Removing the serialisation
 would move a ceiling at 17k that the store itself does not reach until
-460k, so sharding would be optimising the part already 27x faster than the
-part in front of it.
+about 290k, so sharding would be optimising the part already 17x faster
+than the part in front of it.
 
 If throughput ever needed to go up, the profitable places are in that
 gap -- fewer allocations per request, a cheaper JSON path, HTTP/2 or
@@ -236,15 +243,20 @@ bytes, 20,000 entries per row, measured rather than estimated:
 
 | value | ETS bytes/entry | VM bytes/entry | entries per GiB |
 |-------|-----------------|----------------|-----------------|
-| 16 B  | 144             | 217            | ~4.95M          |
-| 64 B  | 144             | 264            | ~4.07M          |
-| 256 B | 144             | 456            | ~2.35M          |
-| 1 KiB | 144             | 1224           | ~0.88M          |
+| 16 B  | 152             | 221 - 224      | ~4.86M          |
+| 64 B  | 152             | 271 - 272      | ~3.95M          |
+| 256 B | 152             | 464 - 468      | ~2.30M          |
+| 1 KiB | 152             | 1233 - 1235    | ~0.87M          |
+
+Every figure here is one word larger than it was before `max_bytes`: rows
+carry the entry's byte charge as a third element, so the quota pays for
+itself at 8 bytes per entry. Worth noticing rather than quietly
+restating -- it is the clearest cost this feature has, and it is small.
 
 Two columns because they answer different questions, and taking only the
 first would flatter the result badly. A value over 64 bytes is a refcounted
 binary on the shared heap, so the table holds a pointer and its own figure
-stays flat at 144 bytes no matter how large the value gets. The VM total
+stays flat at 152 bytes no matter how large the value gets. The VM total
 counts the binary too, and that is the number that fills a machine.
 
 The rule that falls out: **roughly 200 bytes of overhead per entry, plus the
@@ -265,24 +277,37 @@ The second is writes. They still go through one process by design, because
 that is what makes created-vs-updated atomic, and `make bench` measures
 what that costs:
 
-| writers | ops/s | vs 1 writer |
-|---------|-------|-------------|
-| 1       | ~252k | 1.00x       |
-| 2       | ~300k | 1.19x       |
-| 4       | ~372k | 1.48x       |
-| 8       | ~464k | 1.84x       |
+| writers | ops/s       | vs 1 writer   |
+|---------|-------------|---------------|
+| 1       | 145k - 215k | 1.00x         |
+| 2       | 138k - 234k | 0.81x - 1.09x |
+| 4       | 250k - 329k | 1.19x - 2.27x |
+| 8       | 228k - 322k | 1.09x - 1.97x |
 
-Eight writers buy 1.84x, which is the serialisation showing plainly: the
-process handles one message at a time and extra callers mostly keep its
-mailbox from going empty rather than adding parallelism.
+Three runs, and the ranges overlap enough that only the ends of the table
+are really being compared: eight writers buy somewhere between 1.1x and
+2.3x. That is the serialisation showing plainly -- the process handles one
+message at a time, so extra callers mostly keep its mailbox from going
+empty rather than adding parallelism.
+
+**These figures include the byte ceiling.** Without it -- the same harness
+against the store before `max_bytes` existed -- eight writers reached 437k
+and 458k on two runs, against 228k to 322k with it. The quota costs
+roughly a third of write throughput, and the cost is in the write path
+itself: charging the entry and reading the limit happen on every write. A
+binary fast path for the size calculation changed nothing measurable, and
+replacing the per-write `application:get_env` with a constant recovered
+part of the gap but not reliably more than the noise, so neither is in the
+code. The limit stays readable at runtime, which is worth more than
+throughput a client cannot reach.
 
 The conclusion is less dramatic than the shape suggests, and worth stating
-because the shape invites the opposite one. The ceiling is around 460k
-writes a second on one node -- on four cores, on a laptop, through Docker
-Desktop. That is a great deal of writing. Removing the serialisation is
-possible and is described below, but it should be done because a
-measurement says the ceiling is being approached, not because a graph
-flattens.
+because the shape invites the opposite one. The ceiling is somewhere near
+300k writes a second on one node -- on four cores, on a laptop, through
+Docker Desktop -- against a transport that delivers under 20k. Removing
+the serialisation is possible and is described below, but it should be
+done because a measurement says the ceiling is being approached, not
+because a graph flattens.
 
 Two ways to remove it if it ever matters. Writes could go straight to a
 public table with `write_concurrency`, since `ets:insert_new/2` is itself

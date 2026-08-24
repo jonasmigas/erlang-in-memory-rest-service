@@ -31,8 +31,8 @@
 %% the only operation that queues, since reads never enter the mailbox.
 %%
 %% `make bench-http` puts the service at fifteen to nineteen thousand
-%% writes a second and the store itself at around 460k, so a write the
-%% store has not reached within a second is not late -- it is behind a
+%% writes a second and `make bench` puts the store near 300k, so a write
+%% the store has not reached within a second is not late -- it is behind a
 %% queue that is not draining. Waiting five seconds for it only let 1024
 %% connections' worth of doomed requests pile up behind a five-second wall
 %% before failing anyway.
