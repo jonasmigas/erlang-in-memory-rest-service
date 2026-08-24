@@ -77,6 +77,8 @@ http_test_() ->
        fun overwrite_is_not_created/0},
       {"a wedged store still serves reads and 503s writes",
        {timeout, 30, fun store_unavailable/0}},
+      {"300 concurrent writes then 300 concurrent reads agree",
+       {timeout, 120, fun concurrent_load/0}},
       {"a body that never arrives is a 408, not a 413",
        {timeout, 30, fun slow_body_is_a_timeout/0}},
       {"a body over the cap is still a 413", {timeout, 30, fun oversized_body/0}},
@@ -470,9 +472,85 @@ listener_restart() ->
     ?assertEqual(200, Status),
     ?assertEqual(<<"alive">>, maps:get(<<"value">>, Body)).
 
+%% The design document claims this result; until now nothing produced it.
+%% Every other test here drives one request at a time, so the property the
+%% whole store design rests on -- that concurrent requests do not queue
+%% behind each other and do not see each other's data -- was the one
+%% property never exercised.
+%%
+%% Each writer sends a value derived from its own key, so a read that
+%% returns the wrong value proves requests crossed, which a plain 200 would
+%% not catch.
+concurrent_load() ->
+    N = 300,
+    Keys = [concurrent_key(I) || I <- lists:seq(1, N)],
+
+    with_parallel_sessions(
+      fun() ->
+              Writes = pmap(fun(K) ->
+                                    request(put, "/store/" ++ binary_to_list(K),
+                                            "{\"value\": \"" ++
+                                                binary_to_list(concurrent_value(K)) ++ "\"}")
+                            end, Keys),
+              ?assertEqual([], [W || W <- Writes, not is_created(W)]),
+
+              Reads = pmap(fun(K) ->
+                                   {K, request(get, "/store/" ++ binary_to_list(K))}
+                           end, Keys),
+              ?assertEqual([], [R || R <- Reads, not read_matches(R)]),
+              ?assertEqual(N, length(Reads))
+      end).
+
+concurrent_key(I) ->
+    iolist_to_binary(["conc_", integer_to_list(I)]).
+
+%% Distinct per key, so a crossed response is a failed assertion rather
+%% than a coincidence.
+concurrent_value(Key) ->
+    <<"value_of_", Key/binary>>.
+
+is_created({201, _}) -> true;
+is_created(_) -> false.
+
+read_matches({Key, {200, Body}}) ->
+    maps:get(<<"key">>, Body, undefined) =:= Key andalso
+        maps:get(<<"value">>, Body, undefined) =:= concurrent_value(Key);
+read_matches(_) ->
+    false.
+
 %% ===================================================================
 %% Helpers
 %% ===================================================================
+
+%% httpc keeps two sessions per host by default, which would funnel three
+%% hundred "concurrent" requests through two connections and quietly test
+%% nothing. Raised for the duration and put back, since the option is
+%% global to the profile and every other test here shares it.
+with_parallel_sessions(Fun) ->
+    {ok, [{max_sessions, Old}]} = httpc:get_options([max_sessions]),
+    ok = httpc:set_options([{max_sessions, 64}]),
+    try Fun()
+    after
+        httpc:set_options([{max_sessions, Old}])
+    end.
+
+%% The result travels in the exit reason, so there is no window between a
+%% worker's message and its DOWN in which a crash could be read as a
+%% missing reply.
+pmap(Fun, Items) ->
+    Refs = [begin
+                {_Pid, Ref} = spawn_monitor(fun() -> exit({ok, Fun(Item)}) end),
+                Ref
+            end || Item <- Items],
+    [collect(Ref) || Ref <- Refs].
+
+collect(Ref) ->
+    receive
+        {'DOWN', Ref, process, _Pid, {ok, Result}} -> Result;
+        {'DOWN', Ref, process, _Pid, Reason} -> {worker_died, Reason}
+    after 60000 ->
+        {worker_stuck, Ref}
+    end.
 
 http_child_id() ->
     Children = supervisor:which_children(kv_store_sup),
