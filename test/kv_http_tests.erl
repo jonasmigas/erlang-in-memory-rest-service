@@ -71,7 +71,7 @@ http_test_() ->
       {"an unmatched path is a json 404", fun unmatched_path_is_json/0},
       {"an overwrite is a 200, a first write a 201",
        fun overwrite_is_not_created/0},
-      {"an unreachable store is a 503, not a bodiless 500",
+      {"a wedged store still serves reads and 503s writes",
        {timeout, 30, fun store_unavailable/0}},
       {"a body that never arrives is a 408, not a 413",
        {timeout, 30, fun slow_body_is_a_timeout/0}},
@@ -265,10 +265,15 @@ store_unavailable() ->
     Pid = whereis(kv_store),
     ok = sys:suspend(Pid),
     try
-        %% every verb, since each has its own call site
+        %% Reads come straight from the table, so a store process that is
+        %% wedged or busy no longer takes the read path down with it.
+        %% This is the point of reading outside the gen_server: the
+        %% request that is stuck is the only one that suffers.
+        ?assertMatch({200, #{<<"value">> := <<"v">>}}, request(get, "/store/frozen")),
+        %% Writes still go through the process, and still say so plainly
+        %% rather than hanging or answering with a bodiless 500.
         ?assertMatch({503, #{<<"error">> := <<"store_unavailable">>}},
-                     request(get, "/store/frozen")),
-        ?assertMatch({503, _}, request(put, "/store/frozen", "{\"value\": \"w\"}")),
+                     request(put, "/store/frozen", "{\"value\": \"w\"}")),
         ?assertMatch({503, _}, request(post, "/store", "{\"key\": \"f\", \"value\": 1}")),
         ?assertMatch({503, _}, request(delete, "/store/frozen")),
         %% /health does not touch the store, so it keeps answering --
