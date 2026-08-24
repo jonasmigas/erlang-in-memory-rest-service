@@ -33,8 +33,10 @@ The KV Store is built using Erlang/OTP with three main components:
 ### Supervision Tree
 
 - `kv_store_sup` (Supervisor)
-  - `kv_store` (GenServer) - owns the ETS table
-  - `kv_http` (Cowboy) - Handles HTTP requests
+  - `kv_store` (GenServer) - owns the ETS table holding the data
+  - `kv_metrics` (GenServer) - owns the counter table, started before the
+    listener so the table exists by the time a request can arrive
+  - `kv_http` (Cowboy) - handles HTTP requests
 
 `one_for_one` is deliberate: the listener keeps serving while the store
 restarts, and the store keeps its data while the listener restarts. The
