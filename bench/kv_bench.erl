@@ -48,8 +48,9 @@ main(#{reads := Reads, rounds := Rounds, concurrency := Levels}) ->
     %% because that line came from a different set of measurements.
     Measured = [{C, rounds(C, Reads, Rounds)} || C <- Levels],
 
-    io:format("~-6s ~12s ~12s ~9s   ~s~n",
-              ["procs", "ETS ops/s", "gen ops/s", "ratio", "ETS spread (min-max)"]),
+    io:format("~-6s ~12s ~18s ~12s ~18s ~9s~n",
+              ["procs", "ETS ops/s", "ETS (min-max)",
+               "gen ops/s", "gen (min-max)", "ratio"]),
     lists:foreach(fun report/1, Measured),
 
     io:format("~nScaling from 1 process, same measurements:~n"),
@@ -63,10 +64,16 @@ main(#{reads := Reads, rounds := Rounds, concurrency := Levels}) ->
     ok.
 
 report({C, {Ets, Map, Ratios}}) ->
-    io:format("~-6w ~12w ~12w ~9s   ~w - ~w~n",
-              [C, median(Ets), median(Map),
-               io_lib:format("~.2fx", [median_f(Ratios)]),
-               lists:min(Ets), lists:max(Ets)]).
+    io:format("~-6w ~12w ~18s ~12w ~18s ~9s~n",
+              [C, median(Ets), spread(Ets), median(Map), spread(Map),
+               io_lib:format("~.2fx", [median_f(Ratios)])]).
+
+%% Both columns carry their range, not just the first. A median alone
+%% invites a table of single figures, and the figures here move by more
+%% than the effects being described: four readers have spanned 2.6M to
+%% 10.7M inside one run.
+spread(Xs) ->
+    io_lib:format("~w - ~w", [lists:min(Xs), lists:max(Xs)]).
 
 %% One round measures both designs back to back, so whatever the host is
 %% doing at that moment is done to both of them.
@@ -95,14 +102,15 @@ scaling(Measured) ->
 %% costs, which is an assumption, not a measurement. This measures it.
 writes(Reads, Rounds, Levels) ->
     io:format("~nWrites, which still serialise through one process~n"),
-    io:format("  ~-8s ~14s ~10s~n", ["writers", "ops/s", "vs 1"]),
-    Medians = [{C, median([write_run(C, Reads) || _ <- lists:seq(1, Rounds)])}
-               || C <- Levels],
-    [{_, First} | _] = Medians,
+    io:format("  ~-8s ~14s ~20s ~10s~n",
+              ["writers", "ops/s", "(min-max)", "vs 1"]),
+    Runs = [{C, [write_run(C, Reads) || _ <- lists:seq(1, Rounds)]} || C <- Levels],
+    Medians = [{C, median(Rs), Rs} || {C, Rs} <- Runs],
+    [{_, First, _} | _] = Medians,
     lists:foreach(
-      fun({C, Ops}) ->
-              io:format("  ~-8w ~14w ~10s~n",
-                        [C, Ops, io_lib:format("~.2fx", [Ops / First])])
+      fun({C, Ops, Rs}) ->
+              io:format("  ~-8w ~14w ~20s ~10s~n",
+                        [C, Ops, spread(Rs), io_lib:format("~.2fx", [Ops / First])])
       end, Medians).
 
 %% Distinct keys per writer, so this measures the write path rather than
