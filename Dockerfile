@@ -50,6 +50,7 @@ FROM base AS dev
 # test or the benchmark does not invalidate the release build below.
 COPY test ./test
 COPY bench ./bench
+COPY scripts ./scripts
 
 CMD ["rebar3", "shell"]
 

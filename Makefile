@@ -11,9 +11,10 @@ HOST_PORT     ?= 18080
 export HOST_PORT
 
 .DEFAULT_GOAL := help
-.PHONY: help build test cover dialyzer bench bench-http shell up down logs health release smoke release-run clean
+.PHONY: help demo build test cover dialyzer bench bench-http shell up down logs health release smoke release-run clean
 
 help:
+	@echo "make demo         Walk the brief end to end against a running service"
 	@echo "make build        Build the dev image"
 	@echo "make test         Run the EUnit suite"
 	@echo "make cover        Run the suite and report line coverage"
@@ -29,6 +30,18 @@ help:
 	@echo "make smoke        Boot that image and check it serves /health"
 	@echo "make release-run  Run that release image in the foreground"
 	@echo "make clean        Stop everything and drop images and cached builds"
+
+# What a reviewer wants first: the brief, performed rather than described.
+# Depends on up, so it starts the service if it is not already running, and
+# leaves it running afterwards to be poked at.
+#
+# The script path is relative on purpose. The container WORKDIR is /app, and
+# writing it absolutely lets Git Bash rewrite /app/... into a Windows path
+# before docker.exe ever sees it.
+demo: up
+	@$(COMPOSE) run --rm -T $(SERVICE) escript scripts/demo.escript
+	@echo ""
+	@echo "The service is still running on http://localhost:$(HOST_PORT) -- make down to stop it."
 
 build:
 	$(COMPOSE) build
