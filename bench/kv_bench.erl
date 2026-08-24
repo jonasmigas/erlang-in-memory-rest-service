@@ -56,6 +56,7 @@ main(#{reads := Reads, rounds := Rounds, concurrency := Levels}) ->
     scaling(Measured),
 
     contention(Rounds),
+    writes(Reads, Rounds, Levels),
     capacity(),
 
     kv_bench_map:stop(),
@@ -87,6 +88,41 @@ scaling(Measured) ->
               io:format("  ~w process(es): ETS ~.2fx   gen_server ~.2fx~n",
                         [C, E / Ets1, M / Map1])
       end, Medians).
+
+%% Writes still go through the one process, by design: serialising them is
+%% what makes created-vs-updated a single atomic decision. DESIGN.md has
+%% been quoting the gen_server READ figure as a proxy for what that path
+%% costs, which is an assumption, not a measurement. This measures it.
+writes(Reads, Rounds, Levels) ->
+    io:format("~nWrites, which still serialise through one process~n"),
+    io:format("  ~-8s ~14s ~10s~n", ["writers", "ops/s", "vs 1"]),
+    Medians = [{C, median([write_run(C, Reads) || _ <- lists:seq(1, Rounds)])}
+               || C <- Levels],
+    [{_, First} | _] = Medians,
+    lists:foreach(
+      fun({C, Ops}) ->
+              io:format("  ~-8w ~14w ~10s~n",
+                        [C, Ops, io_lib:format("~.2fx", [Ops / First])])
+      end, Medians).
+
+%% Distinct keys per writer, so this measures the write path rather than
+%% contention on one entry.
+write_run(C, N) ->
+    Parent = self(),
+    Start = erlang:monotonic_time(microsecond),
+    Pids = [spawn(fun() ->
+                          Prefix = integer_to_binary(W),
+                          lists:foreach(
+                            fun(I) ->
+                                    Key = <<"w", Prefix/binary, "_",
+                                            (integer_to_binary(I))/binary>>,
+                                    kv_store:set(Key, ?VALUE)
+                            end, lists:seq(1, N)),
+                          Parent ! {done, self()}
+                  end) || W <- lists:seq(1, C)],
+    lists:foreach(fun(Pid) -> receive {done, Pid} -> ok end end, Pids),
+    Elapsed = erlang:monotonic_time(microsecond) - Start,
+    round((N * C) / (Elapsed / 1000000)).
 
 %% What one entry costs, measured rather than estimated, because
 %% "how many fit in a node" is the question that decides whether one node
