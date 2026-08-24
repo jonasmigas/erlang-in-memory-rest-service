@@ -13,9 +13,19 @@
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -define(TABLE, kv_store_table).
--define(DEFAULT_CALL_TIMEOUT, 5000).
+%% How long a write waits for the store before the HTTP layer calls it a
+%% 503. This is a load-shedding decision, not a safety margin: writes are
+%% the only operation that queues, since reads never enter the mailbox.
+%%
+%% `make bench-http` puts the service at fifteen to nineteen thousand
+%% writes a second and the store itself at around 460k, so a write the
+%% store has not reached within a second is not late -- it is behind a
+%% queue that is not draining. Waiting five seconds for it only let 1024
+%% connections' worth of doomed requests pile up behind a five-second wall
+%% before failing anyway.
+-define(DEFAULT_CALL_TIMEOUT, 1000).
 
-%% Overridable so a caller that must answer quickly -- or a test -- can
+%% Overridable so a deployment on slower hardware -- or a test -- can
 %% bound how long it waits on a busy store.
 call_timeout() ->
     application:get_env(kv_store, call_timeout, ?DEFAULT_CALL_TIMEOUT).
@@ -127,10 +137,16 @@ handle_call({set, Key, Value}, _From, T) ->
             updated
     end,
     {reply, {ok, Outcome}, T};
+%% ets:take/2 removes the entry and reports what was there in one
+%% operation, so telling a delete from a miss does not depend on nothing
+%% happening between a member/2 and a delete/2. It only ever ran here, with
+%% one writer, so the old pair was safe -- but it was safe by virtue of the
+%% serialisation rather than on its own, which is exactly the difference
+%% insert_new/2 already avoids on the write side.
 handle_call({delete, Key}, _From, T) ->
-    case ets:member(T, Key) of
-        true -> true = ets:delete(T, Key), {reply, ok, T};
-        false -> {reply, {error, not_found}, T}
+    case ets:take(T, Key) of
+        [_Entry] -> {reply, ok, T};
+        [] -> {reply, {error, not_found}, T}
     end;
 handle_call(clear_all, _From, T) ->
     true = ets:delete_all_objects(T),

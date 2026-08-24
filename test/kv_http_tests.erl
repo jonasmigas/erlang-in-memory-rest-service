@@ -343,7 +343,10 @@ store_unavailable() ->
         ?assertMatch({200, _}, request(get, "/health"))
     after
         ok = sys:resume(Pid),
-        ok = application:set_env(kv_store, call_timeout, 5000)
+        %% Unset rather than restore a literal: the literal was a second
+        %% copy of the default, and it went stale the moment the default
+        %% moved.
+        ok = application:unset_env(kv_store, call_timeout)
     end,
     %% and the listener recovers on its own. Note a call that timed out
     %% was still delivered: the store applies the queued writes once it
