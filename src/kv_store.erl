@@ -9,7 +9,7 @@
 -behaviour(gen_server).
 -compile({no_auto_import, [get/1]}).
 
--export([start_link/0, set/2, get/1, delete/1, clear_all/0, get_all/0]).
+-export([start_link/0, set/2, get/1, delete/1, clear_all/0, get_all/0, ready/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -define(TABLE, kv_store_table).
@@ -90,6 +90,20 @@ get_all() ->
     try maps:from_list(ets:tab2list(?TABLE))
     catch error:badarg -> #{}
     end.
+
+%% Whether the store can serve: a registered process to take writes, and a
+%% table to read from. /health asks this, so it reports on the thing it
+%% exists to report on rather than on the listener that answers it.
+%%
+%% Deliberately two cheap lookups and not a call. A call would detect a
+%% wedged process as well, at the cost of putting every health probe in the
+%% same mailbox as every write -- so a store merely busy would start
+%% failing its probes, and an orchestrator would restart the one component
+%% that was keeping up. A probe must not be able to cause the outage it is
+%% watching for.
+-spec ready() -> boolean().
+ready() ->
+    is_pid(whereis(?MODULE)) andalso ets:whereis(?TABLE) =/= undefined.
 
 %% ===================================================================
 %% gen_server callbacks

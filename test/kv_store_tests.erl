@@ -104,6 +104,20 @@ no_store_running_test() ->
     ?assertEqual({error, unavailable}, kv_store:get(<<"anything">>)),
     ?assertEqual(#{}, kv_store:get_all()).
 
+%% /health answers with this, so it has to report the store's absence as
+%% well as its presence -- the whole point is that it stops agreeing with
+%% the listener once the store is gone.
+ready_test() ->
+    setup(),
+    ?assert(kv_store:ready()),
+    %% Stopped the way no_store_running_test stops it: normally, so the
+    %% link back to the runner is not followed.
+    case whereis(kv_store) of
+        undefined -> ok;
+        Pid -> catch gen_server:stop(Pid, normal, 5000)
+    end,
+    ?assertNot(kv_store:ready()).
+
 %% Overwrite test
 overwrite_test() ->
     setup(),

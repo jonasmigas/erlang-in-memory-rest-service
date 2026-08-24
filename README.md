@@ -129,7 +129,7 @@ on 8080; under Docker (`make up`) use 18080.
 | `POST` | `/store` | `{"key": ..., "value": ...}` | `201` created / `200` replaced | `400`, `408`, `413` |
 | `PUT` | `/store/:key` | `{"value": ...}` | `201` created / `200` replaced | `400`, `408`, `413` |
 | `DELETE` | `/store/:key` | — | `204` | `404` `key_not_found` |
-| `GET` | `/health` | — | `200` `{"status":"ok",...}` | — |
+| `GET` | `/health` | — | `200` `{"status":"ok",...}` | `503` `store_unavailable` |
 | `GET` | `/metrics` | — | `200` Prometheus text | — |
 
 `HEAD` is accepted wherever `GET` is, and returns the same status with no
@@ -159,7 +159,9 @@ over the size limit returns `413`; one that stops arriving part-way
 returns `408`, which is retryable where `413` is not. If the store itself
 cannot be reached, the answer is `503` `store_unavailable` -- the HTTP
 listener stays up across a store restart, so this is a state a client can
-observe.
+observe. `/health` answers `503` in that same window rather than `200`,
+because a probe that only proves the listener is up proves the one thing
+that must already be true for the answer to arrive.
 
 Reading a key that holds no data is always a `404` with an explicit
 `key_not_found` error, never an empty `200` -- a client can tell "no data

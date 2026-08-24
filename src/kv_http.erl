@@ -121,8 +121,20 @@ handle_request(metrics, <<"GET">>, Req) ->
 handle_request(metrics, _Method, Req) ->
     method_not_allowed(?READ_METHODS, Req);
 
+%% A health check that always answers 200 reports on the listener, which
+%% is the one component that must already be working for the answer to
+%% arrive at all. During a store restart this route said ok while every
+%% write returned 503, so an orchestrator kept routing traffic to a node
+%% that could not serve it.
 handle_request(health, <<"GET">>, Req) ->
-    reply(200, #{status => ok, timestamp => os:system_time(second)}, Req);
+    case kv_store:ready() of
+        true ->
+            reply(200, #{status => ok, timestamp => os:system_time(second)}, Req);
+        false ->
+            reply(503, #{status => <<"unavailable">>,
+                         error => <<"store_unavailable">>,
+                         timestamp => os:system_time(second)}, Req)
+    end;
 handle_request(health, _Method, Req) ->
     method_not_allowed(?READ_METHODS, Req);
 
