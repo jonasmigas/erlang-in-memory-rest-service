@@ -58,6 +58,8 @@ container).
 | `make build` | Build the dev image |
 | `make demo` | Walk the brief end to end against a running service |
 | `make test` | Run the EUnit suite |
+| `make cover` | Run the suite and report line coverage (90% at present) |
+| `make dialyzer` | Check the specs in `src/` against the code |
 | `make bench` | Compare the ETS read path against a gen_server (see [DESIGN](DESIGN.md#concurrency)) |
 | `make bench-http` | Measure requests per second through cowboy (see [DESIGN](DESIGN.md#concurrency)) |
 | `make shell` | Open a `rebar3 shell` with the app started (no published port, so it works alongside `make up`) |
@@ -223,6 +225,8 @@ beside it that could pass while the real build fails.
 | Job | What it guards |
 |-----|----------------|
 | `make test` | the suite, and `warnings_as_errors` at compile time |
+| `make dialyzer` | the specs in `src/`, which are checked rather than decorative |
+| `make cover` | line coverage, reported rather than enforced |
 | the reverse module order | the suite passes in rebar3's default order because that order happens to be the safe one; this stops a rename quietly reintroducing the fixture bug |
 | the bench profile | `bench/` is compiled by no other step, so a harness could rot until a reviewer ran it |
 | `make release` | a release that compiles but cannot boot -- the target ends by starting the image and asking it for `/health` |
