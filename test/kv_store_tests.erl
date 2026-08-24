@@ -5,8 +5,20 @@
 -include_lib("eunit/include/eunit.hrl").
 
 %% Setup/teardown
+%%
+%% start_link/0 is called from the eunit test process, which exits normally
+%% between tests, so the store it started survives and every test in this
+%% module shares one table. Clearing it here is what makes each test start
+%% from a known state: get_all_test asserts an absolute count, and it
+%% passed only because clear_all_test happened to run immediately before
+%% it. Run it any earlier -- a rename, a new test, a different eunit
+%% ordering -- and it counted the keys other tests had left behind.
 setup() ->
-    kv_store:start_link(),
+    case whereis(kv_store) of
+        undefined -> {ok, _} = kv_store:start_link();
+        _Pid -> ok
+    end,
+    ok = kv_store:clear_all(),
     ok.
 
 teardown(_) ->
