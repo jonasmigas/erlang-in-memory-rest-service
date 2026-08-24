@@ -23,7 +23,9 @@ The KV Store is built using Erlang/OTP with three main components:
 ### Request Flow
 
 1. Client sends HTTP request (GET, POST, PUT, DELETE) to Cowboy on port 8080
-2. Cowboy parses the request and extracts the key and method
+2. Cowboy matches a route and names it: the store, the health check, or
+   neither -- an unmatched path is answered by the handler as a JSON 404
+   rather than by the router as an empty one
 3. Reads look the key up in the ETS table directly; writes call the GenServer
 4. The GenServer applies the write and reports whether it created or replaced
 5. The response is sent back to the client
@@ -101,10 +103,12 @@ schedulers:
 | 8       | ~9.5M     | ~0.53M           | ~18x  |
 
 The ratio is not the interesting part. This is: adding readers multiplies
-ETS throughput by about 2.8-3.3x across four cores, and the gen_server by
-about 1.5x. One process handles one message at a time, so its total is
-close to flat no matter how many callers arrive — which is the whole
-argument, in a measurement rather than in prose.
+ETS throughput by roughly 2.3 to 3.3x across four cores depending on the
+run, and the gen_server by about 1.5x. One process handles one message at
+a time, so its total is close to flat no matter how many callers arrive —
+which is the whole argument, in a measurement rather than in prose.
+
+Run it and the figures will differ; the shape is what reproduces.
 
 Availability, which is the reason the change was made: `kv_http_tests`
 suspends the GenServer with `sys:suspend/1` and asserts reads keep
@@ -141,9 +145,9 @@ client pulling a multi-megabyte entry still consumes CPU and allocator
 bandwidth every other request needs.
 
 Measured — one client looping over a 4MB value while small-key reads run
-alongside — throughput retained is about 54% with ETS and about 45%
-through the GenServer. Better, but both lose roughly half, so this is not
-the fix for that problem.
+alongside — throughput retained is roughly 54-56% with ETS against 40-45%
+through the GenServer, across several runs. Better, but both lose about
+half, so this is not the fix for that problem.
 
 If it mattered, the answer is not more concurrency. It is not storing
 values large enough to care about, or handing back a reference instead of a
