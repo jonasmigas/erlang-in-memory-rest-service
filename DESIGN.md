@@ -258,6 +258,63 @@ keeps answering `200` on `/health` as though nothing happened. That is the
 right trade for the brief and the wrong one for anything that must not lose
 data; persistence would be the next design decision, not a tuning exercise.
 
+## Security
+
+Nothing here is a security control by accident, so it is worth being
+explicit about which of it is one, and about the much larger set of things
+that are simply absent.
+
+### What is in place
+
+- The release runs as an unprivileged `kv` user, from an image holding the
+  release and nothing else -- no shell beyond busybox, no compiler, no
+  sources.
+- Erlang distribution is confined to loopback and carries no committed
+  cookie; the VM generates one per container at first boot. Reaching the
+  node from another container is not possible over the network.
+- Request bodies are capped at 1 MiB and bounded by a read deadline, so a
+  single client can neither submit unbounded input nor hold a connection
+  open indefinitely sending nothing.
+- Keys are validated at the boundary, so nothing unaddressable is stored.
+- ranch caps concurrent connections at 1024, its default, unchanged.
+
+### What is absent
+
+There is **no authentication and no authorisation**. Anything that can
+reach the port can read, overwrite and delete any key; the service has no
+concept of a caller at all. There is no TLS -- the listener is `ranch_tcp`
+on `0.0.0.0`. There is no rate limiting beyond that connection cap, and no
+audit trail: a successful delete leaves a counter increment and nothing
+else.
+
+The sharpest edge is the combination of no authentication and no quota.
+Capacity above puts a node at roughly 5M small entries per GiB, and
+nothing stops one client walking to that number. Memory exhaustion is the
+cheapest denial of service available here and it requires no cleverness --
+just a loop.
+
+### What this assumes
+
+That it sits on a trusted network, behind something that terminates TLS
+and decides who is allowed to talk to it. That is a reasonable shape for
+an internal cache and an unreasonable one for anything reachable from
+outside, and the assumption is worth stating because nothing in the code
+enforces it.
+
+### What would change if it did not hold
+
+In the order worth doing them:
+
+1. **A quota** -- entries or bytes, rejecting or evicting past a
+   threshold. It comes first because it is the only failure on this list
+   that needs no attacker, just a busy client with a loop.
+2. **Authentication**, at the edge or as a token check in the handler.
+   Cheap, and it makes the rest of this list meaningful.
+3. **TLS**, via `cowboy_tls` or terminated in front.
+4. **Per-client rate limiting**, which needs identity, so it follows 2.
+5. **Audit logging** of writes and deletes, which also needs identity to
+   be worth anything.
+
 ## API Design
 
 ### Endpoints
