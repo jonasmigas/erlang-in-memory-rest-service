@@ -30,6 +30,15 @@ jobs:
       - name: Run the suite in the reverse module order
         run: docker compose run --rm kv_store rebar3 eunit --module=kv_store_tests,kv_http_tests
 
+      # Checks the specs in src/ against the code. Without it they are
+      # decoration -- and the run that introduced this found ranch and cowlib
+      # being called by an application that never declared them.
+      - name: Check the specs with dialyzer
+        run: make dialyzer
+
+      - name: Report line coverage
+        run: make cover
+
       # `make release` builds the runtime stage and then boots the image and
       # asks it for /health, so this also covers the failure the tests cannot
       # see: a release that compiles and cannot start.

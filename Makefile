@@ -11,11 +11,13 @@ HOST_PORT     ?= 18080
 export HOST_PORT
 
 .DEFAULT_GOAL := help
-.PHONY: help build test bench shell up down logs health release smoke release-run clean
+.PHONY: help build test cover dialyzer bench shell up down logs health release smoke release-run clean
 
 help:
 	@echo "make build        Build the dev image"
 	@echo "make test         Run the EUnit suite"
+	@echo "make cover        Run the suite and report line coverage"
+	@echo "make dialyzer     Check the specs in src/ against the code"
 	@echo "make bench        Compare the ETS read path against a gen_server"
 	@echo "make shell        Open a rebar3 shell with the app started"
 	@echo "make up           Start the service and wait for it to be healthy"
@@ -35,6 +37,23 @@ build:
 # tested against the previous image.
 test: build
 	$(COMPOSE) run --rm $(SERVICE) rebar3 eunit
+
+# Checks the specs in src/, within limits worth knowing. It found the bug
+# that prompted this target -- kv_http calls ranch and cowlib directly and
+# the application declared neither -- and it catches type errors in pure
+# code emphatically: breaking one helper's return type flagged seven sites
+# and two functions as unreachable.
+#
+# What it cannot check here: anything whose success typing passes through
+# gen_server:call/3, which returns any(). That covers set/2, delete/1 and
+# clear_all/0, so their specs are documentation rather than verified. get/1
+# and get_all/0 read ETS in the caller and are checked.
+dialyzer: build
+	$(COMPOSE) run --rm $(SERVICE) rebar3 dialyzer
+
+# What the suite does not reach, made visible rather than assumed.
+cover: build
+	$(COMPOSE) run --rm $(SERVICE) sh -c 'rebar3 eunit --cover && rebar3 cover'
 
 # Compares reading from ETS against reading through a gen_server, both in
 # one VM and alternating, so host noise lands on both. Not part of `make

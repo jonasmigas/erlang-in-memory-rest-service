@@ -3,10 +3,18 @@
   {vsn, "0.1.0"},
   {registered, []},
   {mod, {kv_store_app, []}},
+  %% ranch and cowlib are called directly -- ranch:child_spec/5 builds the
+   %% listener child and cow_uri:urlencode/1 encodes the Location header --
+   %% so they are dependencies of this application, not just of cowboy.
+   %% Leaving them undeclared worked only because cowboy happens to pull
+   %% them in; changing or dropping cowboy would have failed at boot with
+   %% undef rather than at build time.
   {applications,
    [kernel,
     stdlib,
     cowboy,
+    cowlib,
+    ranch,
     jsx
    ]},
   %% The application's own default. application:get_env/2 finds it
