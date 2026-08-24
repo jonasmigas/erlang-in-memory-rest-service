@@ -167,35 +167,46 @@ Every figure above measures kv_store directly. None of them is what the
 service serves: between a client and the table sit a socket read, request
 parsing, routing, JSON decoding and encoding, and a socket write.
 `make bench-http` drives the real listener over persistent connections and
-measures that. On four cores, through Docker Desktop:
+measures that. On four cores, through Docker Desktop -- each cell the range
+of the per-run medians across three runs of five rounds:
 
-| connections | GET req/s | PUT req/s |
-|-------------|-----------|-----------|
-| 1           | ~4.9k     | ~3.5k     |
-| 4           | ~16.0k    | ~13.0k    |
-| 16          | ~19.5k    | ~13.3k    |
-| 64          | ~24.0k    | ~13.2k    |
+| connections | GET req/s     | PUT req/s     |
+|-------------|---------------|---------------|
+| 1           | 4.3k - 4.5k   | 2.5k - 3.7k   |
+| 4           | 3.9k - 12.5k  | 8.3k - 9.1k   |
+| 16          | 20.7k - 23.0k | 15.3k - 19.6k |
+| 64          | 18.6k - 24.5k | 14.7k - 18.9k |
+
+Ranges, not single figures, and wide ones: within one run the five rounds
+at sixteen connections spanned 11k to 26k. The 4-connection GET row is the
+honest embarrassment -- two runs put it near 12k and one near 3.9k, which
+is the host, not the server. Nothing below leans on a difference smaller
+than the noise, and the shape only reproduces from sixteen connections up,
+where both verbs flatten.
 
 Set beside the in-process numbers, the gap is the whole point:
 
 | | in kv_store | through HTTP | ratio |
 |---|---|---|---|
-| reads  | ~9M ops/s   | ~24k req/s | ~375x |
-| writes | ~460k ops/s | ~13k req/s | ~35x  |
+| reads  | ~9M ops/s   | ~22k req/s | ~400x |
+| writes | ~460k ops/s | ~17k req/s | ~27x  |
 
-**The store is not the constraint. The HTTP layer is, by two orders of
-magnitude.** Everything the concurrency work above achieved -- reads that
-scale across cores, a write path that does not queue behind reads -- is
-real and is invisible from outside, because the request never gets near
-those limits.
+**The store is not the constraint. The HTTP layer is -- by 27x on writes
+and 400x on reads.** Everything the concurrency work above achieved --
+reads that scale across cores, a write path that does not queue behind
+reads -- is real and is invisible from outside, because the request never
+gets near those limits.
 
 This is worth stating plainly because it changes what the earlier sections
-mean. Writes plateau at four connections and stay at roughly 13k however
-many more arrive, which is the serialisation showing through the
-transport; but it plateaus at 13k, not at 460k, so removing the
-serialisation would move a ceiling that nothing is pressing against.
-Sharding the store would be optimising the part that is already 35x
-faster than the part in front of it.
+mean. Both verbs flatten from sixteen connections -- reads in the low
+twenties of thousands, writes in the middle to high teens -- and the
+distance between them is the only trace the write serialisation leaves at
+this level. It is a small trace: the path that serialises every write comes
+within about a quarter of the path that serialises nothing, because the
+socket, the parsing and the JSON dominate both. Removing the serialisation
+would move a ceiling at 17k that the store itself does not reach until
+460k, so sharding would be optimising the part already 27x faster than the
+part in front of it.
 
 If throughput ever needed to go up, the profitable places are in that
 gap -- fewer allocations per request, a cheaper JSON path, HTTP/2 or
