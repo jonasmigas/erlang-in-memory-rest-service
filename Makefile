@@ -75,12 +75,34 @@ release:
 # musl or OpenSSL soname skew between the two surfaces at startup, not at
 # build time -- and nothing else in this file exercises the release. Booting
 # it once and asking for /health turns that into a failed build.
+#
+# The retry loop sits out here rather than inside a single docker exec. If
+# the container is not accepting exec yet when the probe fires, one exec
+# fails and takes the whole check with it -- a container that was merely
+# slow to start would be reported as a release that cannot boot. Retrying
+# the exec itself makes not-ready-yet indistinguishable from not-serving-yet,
+# which is what this wants.
 smoke:
 	-@docker rm -f kv-smoke >/dev/null 2>&1
 	@docker run -d --name kv-smoke $(RELEASE_IMAGE) >/dev/null
-	@docker exec kv-smoke sh -c 'i=0; until wget -qO- "http://127.0.0.1:$$APP_PORT/health"; do i=$$((i+1)); [ $$i -lt 30 ] || exit 1; sleep 1; done' >/dev/null 2>&1 || { echo "smoke: $(RELEASE_IMAGE) did not serve /health"; docker logs kv-smoke 2>&1 | tail -20; docker rm -f kv-smoke >/dev/null 2>&1; exit 1; }
-	-@docker rm -f kv-smoke >/dev/null 2>&1
-	@echo "smoke: $(RELEASE_IMAGE) booted and served /health"
+	@ok=0; \
+	for i in $$(seq 1 30); do \
+	    if docker exec kv-smoke sh -c 'wget -qO- "http://127.0.0.1:$$APP_PORT/health"' >/dev/null 2>&1; then \
+	        ok=1; break; \
+	    fi; \
+	    if [ -z "$$(docker ps -q -f name=kv-smoke)" ]; then \
+	        echo "smoke: container exited before it served anything"; break; \
+	    fi; \
+	    sleep 1; \
+	done; \
+	if [ $$ok -eq 1 ]; then \
+	    echo "smoke: $(RELEASE_IMAGE) booted and served /health"; \
+	else \
+	    echo "smoke: $(RELEASE_IMAGE) did not serve /health; its output follows"; \
+	    docker logs kv-smoke 2>&1 | tail -30; \
+	fi; \
+	docker rm -f kv-smoke >/dev/null 2>&1; \
+	[ $$ok -eq 1 ]
 
 release-run: release
 	docker run --rm -p $(HOST_PORT):8080 $(RELEASE_IMAGE)
