@@ -69,6 +69,10 @@ http_test_() ->
        fun health_trailing_slash/0},
       {"head answers wherever get does", fun head_mirrors_get/0},
       {"an unmatched path is a json 404", fun unmatched_path_is_json/0},
+      {"metrics are exposed in prometheus text", fun metrics_exposed/0},
+      {"a counter moves when the thing it counts happens",
+       fun metrics_count_what_happened/0},
+      {"the metrics route serves no writes", fun metrics_rejects_writes/0},
       {"an overwrite is a 200, a first write a 201",
        fun overwrite_is_not_created/0},
       {"a wedged store still serves reads and 503s writes",
@@ -219,6 +223,55 @@ health_rejects_writes() ->
     ?assertMatch({405, _}, request(delete, "/health")),
     %% and the store is untouched by any of them
     ?assertMatch({404, _}, request(get, "/store/via_health")).
+
+metrics_exposed() ->
+    %% Drive two known outcomes first, so the scrape has something to say.
+    ?assertMatch({201, _}, request(put, "/store/metric_probe", "{\"value\": \"m\"}")),
+    ?assertMatch({200, _}, request(get, "/store/metric_probe")),
+    {Status, Headers, Body} = raw_request(get, "/metrics"),
+    ?assertEqual(200, Status),
+    %% Prometheus text, not JSON: this is the one endpoint the all-JSON
+    %% rule does not cover, and a scraper decides by content-type.
+    ?assertEqual("text/plain; version=0.0.4",
+                 proplists:get_value("content-type", Headers)),
+    ?assertNotEqual(nomatch, string:find(Body, "# TYPE kv_http_requests_total counter")),
+    ?assertNotEqual(nomatch, string:find(Body, "method=\"GET\",status=\"200\"")),
+    ?assertNotEqual(nomatch, string:find(Body, "op=\"set\",result=\"created\"")),
+    %% Gauges are read at scrape time, so they describe now, not last time.
+    ?assertNotEqual(nomatch, string:find(Body, "# TYPE kv_store_entries gauge")),
+    ?assert(metric(Body, "kv_store_entries ") > 0).
+
+metrics_count_what_happened() ->
+    Label = "kv_http_requests_total{method=\"DELETE\",status=\"404\"} ",
+    {_, _, Before} = raw_request(get, "/metrics"),
+    ?assertMatch({404, _}, request(delete, "/store/never_existed_at_all")),
+    {_, _, After} = raw_request(get, "/metrics"),
+    %% Asserting it moved, not what it equals: the suite shares one store
+    %% and a test that pins an absolute count breaks when another is added.
+    ?assert(metric(After, Label) > metric(Before, Label)),
+    MissLabel = "kv_store_operations_total{op=\"delete\",result=\"miss\"} ",
+    ?assert(metric(After, MissLabel) > metric(Before, MissLabel)).
+
+metrics_rejects_writes() ->
+    ?assertMatch({405, _}, request(put, "/metrics", "{\"value\": \"x\"}")),
+    ?assertMatch({405, _}, request(delete, "/metrics")).
+
+%% Read the number off a metrics line, given everything before it.
+%%
+%% Anchored to the start of a line: an unlabelled name like
+%% "kv_store_entries " also appears inside "# HELP kv_store_entries ...",
+%% which comes first and is followed by prose rather than a number.
+metric(Body, Prefix) ->
+    case string:find(Body, "\n" ++ Prefix) of
+        nomatch ->
+            0;
+        Found ->
+            Tail = string:slice(Found, string:length(Prefix) + 1),
+            case string:take(Tail, "0123456789") of
+                {[], _} -> 0;
+                {Digits, _} -> list_to_integer(Digits)
+            end
+    end.
 
 unmatched_path_is_json() ->
     %% The README promises every response is JSON, but an unmatched path
@@ -488,6 +541,12 @@ do_request(Method, Request) ->
 %% the header is the contract being asserted.
 request_with_headers(options, Path) ->
     do_request_with_headers(options, {base() ++ Path, []}).
+
+%% Undecoded, for the one endpoint that does not answer in JSON.
+raw_request(get, Path) ->
+    {ok, {{_Vsn, Status, _Reason}, Headers, Body}} =
+        httpc:request(get, {base() ++ Path, []}, [], []),
+    {Status, Headers, Body}.
 
 request_with_headers(post, Path, Body) ->
     do_request_with_headers(post, {base() ++ Path, [], "application/json", Body}).

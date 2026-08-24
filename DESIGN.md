@@ -218,6 +218,37 @@ What would change the answer: state that must outlive a process restart
 machine. Any of those and an external store earns its network hop, and the
 hop is the cost being accepted — not a detail.
 
+### Observability
+
+Two questions an operator asks that the API cannot answer: is it busy, and
+did something fail that the client saw but nobody recorded.
+
+`/metrics` answers the first in Prometheus text -- responses by method and
+status, store operations by result, and gauges for entries held and bytes
+used. The counters live in a public ETS table with `write_concurrency` and
+are incremented in the request process. Routing them through a metrics
+process would have put back the queue the read path was moved out of, and
+it would have done so at the worst moment: the busier the system, the
+longer that queue, so the numbers would degrade exactly when they are
+being read to find out why. A counter that cannot be written is dropped
+rather than failing the request that produced it.
+
+The gauges are read at scrape time from `ets:info/2` instead of being
+tracked as the store changes, so they cannot drift from what they
+describe.
+
+Logging covers the failures that previously left no trace at all: the
+store being unreachable, a body that stopped arriving, a body read that
+failed for a reason the classifier collapsed away. All three are the same
+shape -- the client learns something the operator does not, unless it is
+written down. They are logged at warning, above the default `notice`
+threshold, so they appear without reconfiguring anything. The listener
+logs its port at notice on the way up.
+
+What is deliberately absent: request duration. A histogram is the obvious
+next metric and the one most worth having, but doing it properly means
+bucket choices this has no traffic to inform.
+
 ### Durability
 
 There is none, by design: the brief asks for an in-memory store. The table

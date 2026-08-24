@@ -33,11 +33,17 @@ init([]) ->
         modules => [kv_store]
     },
 
-    %% Child 2: the cowboy listener. kv_http:child_spec/0 returns ranch's
+    %% Child 2: the metrics table owner. Started before the listener so
+    %% the table exists by the time a request can arrive; a request that
+    %% beats it is counted as nothing rather than failing, but there is no
+    %% reason to arrange that.
+    MetricsChild = kv_metrics:child_spec(),
+
+    %% Child 3: the cowboy listener. kv_http:child_spec/0 returns ranch's
     %% own spec so the listener is supervised here rather than by ranch_sup.
     HttpChild = kv_http:child_spec(),
 
-    Children = [StoreChild, HttpChild],
+    Children = [StoreChild, MetricsChild, HttpChild],
 
     %% One-for-one: if one child dies, only that child is restarted
     {ok, {{?STRATEGY, 5, 10}, Children}}.

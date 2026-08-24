@@ -5,6 +5,8 @@
 -module(kv_http).
 -behaviour(cowboy_handler).
 
+-include_lib("kernel/include/logger.hrl").
+
 %% Supervisor child API
 -export([child_spec/0]).
 %% Cowboy handler
@@ -15,9 +17,9 @@
 -define(BODY_DEADLINE, 15000).    %% for the whole body
 
 -define(STORE_METHODS, [<<"GET">>, <<"HEAD">>, <<"POST">>, <<"PUT">>, <<"DELETE">>]).
--define(HEALTH_METHODS, [<<"GET">>, <<"HEAD">>]).
+-define(READ_METHODS, [<<"GET">>, <<"HEAD">>]).
 
--type route() :: store | health | not_found.
+-type route() :: store | health | metrics | not_found.
 
 %% ===================================================================
 %% Supervisor child API
@@ -42,6 +44,11 @@ child_spec() ->
         env => #{dispatch => dispatch()},
         connection_type => supervisor
     },
+    %% notice, not info: the kernel logger sits at notice by default and
+    %% config/sys.config deliberately leaves it there, so an info line
+    %% would be written for nobody. A listener coming up is worth one
+    %% line at the level that is actually on.
+    ?LOG_NOTICE(#{event => listener_starting, port => port()}),
     ranch:child_spec(?MODULE, ranch_tcp, TransOpts, cowboy_clear, ProtoOpts).
 
 %% The listen port. The default lives in kv_store.app.src, so this
@@ -76,6 +83,7 @@ dispatch() ->
         {'_', [
             {"/store/[:key]", ?MODULE, store},
             {"/health", ?MODULE, health},
+            {"/metrics", ?MODULE, metrics},
             %% Last, so it catches only what the routes above did not.
             %% Without it cowboy's router answers an unmatched path
             %% itself, with a bodiless 404 -- the one response in the API
@@ -104,18 +112,29 @@ init(Req0, Route) ->
 handle_request(not_found, _Method, Req) ->
     reply(404, #{error => <<"not_found">>}, Req);
 
+%% Prometheus text, not JSON. It is the format a scraper already speaks,
+%% and inventing a JSON shape here would mean writing the exporter too.
+%% This is the one endpoint the all-JSON rule in the README does not cover.
+handle_request(metrics, <<"GET">>, Req) ->
+    Headers = #{<<"content-type">> => <<"text/plain; version=0.0.4">>},
+    respond(200, Headers, kv_metrics:render(), Req);
+handle_request(metrics, _Method, Req) ->
+    method_not_allowed(?READ_METHODS, Req);
+
 handle_request(health, <<"GET">>, Req) ->
     reply(200, #{status => ok, timestamp => os:system_time(second)}, Req);
 handle_request(health, _Method, Req) ->
-    method_not_allowed(?HEALTH_METHODS, Req);
+    method_not_allowed(?READ_METHODS, Req);
 
 handle_request(store, <<"GET">>, Req) ->
     %% GET /store/{key}
     with_key(Req, fun(Key) ->
         case call_store(fun() -> kv_store:get(Key) end) of
             {ok, Key, Value} ->
+                kv_metrics:store_op(get, hit),
                 reply(200, #{key => Key, value => Value}, Req);
             {error, not_found} ->
+                kv_metrics:store_op(get, miss),
                 reply(404, #{error => <<"key_not_found">>,
                              key => Key}, Req);
             {error, invalid_key} ->
@@ -147,8 +166,10 @@ handle_request(store, <<"DELETE">>, Req) ->
     with_key(Req, fun(Key) ->
         case call_store(fun() -> kv_store:delete(Key) end) of
             ok ->
+                kv_metrics:store_op(delete, ok),
                 reply(204, Req);
             {error, not_found} ->
+                kv_metrics:store_op(delete, miss),
                 reply(404, #{error => <<"key_not_found">>,
                              key => Key}, Req);
             {error, invalid_key} ->
@@ -190,8 +211,15 @@ with_json_body(Req, Expected, Fun) ->
         {error, too_large} ->
             reply(413, #{error => <<"request_too_large">>}, Req);
         {error, timeout} ->
+            ?LOG_WARNING(#{event => request_body_timeout,
+                           path => cowboy_req:path(Req),
+                           deadline_ms => body_deadline()}),
             reply(408, #{error => <<"request_timeout">>}, Req);
         {error, bad_request} ->
+            %% read_body/1 collapses anything it cannot classify into this,
+            %% so the log line is the only place the reason survives.
+            ?LOG_WARNING(#{event => request_body_failed,
+                           path => cowboy_req:path(Req)}),
             reply(400, #{error => <<"bad_request">>}, Req)
     end.
 
@@ -209,6 +237,7 @@ write(Key, Value, Req) ->
         true ->
             case call_store(fun() -> kv_store:set(Key, Value) end) of
                 {ok, Outcome} ->
+                    kv_metrics:store_op(set, Outcome),
                     stored(Outcome, Key,
                            #{key => Key, value => Value,
                              status => <<"stored">>}, Req);
@@ -262,7 +291,7 @@ stored(created, Key, Body, Req) ->
     Headers = maps:put(<<"location">>,
                        <<"/store/", (cow_uri:urlencode(Key))/binary>>,
                        json_headers()),
-    cowboy_req:reply(201, Headers, jsx:encode(Body), Req);
+    respond(201, Headers, jsx:encode(Body), Req);
 stored(updated, _Key, Body, Req) ->
     reply(200, Body, Req).
 
@@ -280,6 +309,13 @@ call_store(Fun) ->
     end.
 
 unavailable(Req) ->
+    kv_metrics:store_op(any, unavailable),
+    %% The store being unreachable is the one failure an operator has to
+    %% know about and the one the response body cannot tell them about,
+    %% since the client sees it and they do not.
+    ?LOG_WARNING(#{event => store_unavailable,
+                   method => cowboy_req:method(Req),
+                   path => cowboy_req:path(Req)}),
     reply(503, #{error => <<"store_unavailable">>}, Req).
 
 %% Run Fun with the path key, or answer 400 when the route carried none.
@@ -381,13 +417,24 @@ body_deadline() ->
 
 -spec reply(integer(), cowboy_req:req()) -> cowboy_req:req().
 reply(StatusCode, Req) ->
-    cowboy_req:reply(StatusCode, json_headers(), Req).
+    respond(StatusCode, json_headers(), Req).
 
 -spec reply(integer(), binary() | map(), cowboy_req:req()) -> cowboy_req:req().
 reply(StatusCode, Body, Req) when is_map(Body) ->
     reply(StatusCode, jsx:encode(Body), Req);
 reply(StatusCode, Body, Req) when is_binary(Body) ->
-    cowboy_req:reply(StatusCode, json_headers(), Body, Req).
+    respond(StatusCode, json_headers(), Body, Req).
+
+%% Every response leaves through here, so the counter cannot drift from
+%% what was actually sent -- counting at the call sites instead would mean
+%% remembering to, in each of a dozen branches.
+respond(Status, Headers, Req) ->
+    kv_metrics:request(cowboy_req:method(Req), Status),
+    cowboy_req:reply(Status, Headers, Req).
+
+respond(Status, Headers, Body, Req) ->
+    kv_metrics:request(cowboy_req:method(Req), Status),
+    cowboy_req:reply(Status, Headers, Body, Req).
 
 %% RFC 7231 makes Allow mandatory on a 405, so a client that guessed the
 %% method wrong can discover what the resource does support.
@@ -396,7 +443,7 @@ method_not_allowed(Allowed, Req) ->
     Headers = maps:put(<<"allow">>,
                        iolist_to_binary(lists:join(<<", ">>, Allowed)),
                        json_headers()),
-    cowboy_req:reply(405, Headers,
+    respond(405, Headers,
                      jsx:encode(#{error => <<"method_not_allowed">>}), Req).
 
 json_headers() ->
