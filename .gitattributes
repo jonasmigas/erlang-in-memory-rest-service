@@ -7,5 +7,7 @@
 Dockerfile      text eol=lf
 .dockerignore   text eol=lf
 Makefile        text eol=lf
+*.sh            text eol=lf
+*.escript       text eol=lf
 *.yml           text eol=lf
 config/*        text eol=lf

@@ -6,12 +6,15 @@ A simple in-memory key-value store with a REST API, built in Erlang using OTP an
 
 ## Features
 
-- **In-memory storage** using Erlang maps (no external database)
-- **RESTful HTTP API** with GET, POST, PUT, DELETE endpoints
-- **JSON request/response** format
-- **Concurrent-safe** using GenServer
-- **Fault-tolerant** with OTP supervision
-- **Health check endpoint** for monitoring
+- **In-memory storage** in an ETS table owned by a supervised process, no
+  external database
+- **RESTful HTTP API** over GET, HEAD, POST, PUT and DELETE
+- **JSON request/response**, except `/metrics`
+- **Reads run in the calling process** and scale across cores; writes are
+  serialised so that created-versus-replaced is a single atomic decision
+- **Fault-tolerant** under OTP supervision: the listener keeps serving
+  while the store restarts, and vice versa
+- **Health and metrics endpoints** for monitoring
 
 ## Requirements
 
@@ -24,11 +27,24 @@ A simple in-memory key-value store with a REST API, built in Erlang using OTP an
 
 ## Quick start
 
+Docker is the only requirement. To see the service do what the brief asks:
+
 ```bash
+make demo      # start it, then walk the brief end to end and show each answer
+```
+
+To run the tests, or to start it and poke at it yourself:
+
+```bash
+make test      # the EUnit suite, in the same container CI uses
 make up        # build and start the service in the background
 make health    # confirm it answers
 make down      # stop it
 ```
+
+A passing `make test` prints a few `WARNING REPORT` lines. They are
+deliberate: two tests suspend the store and stall a request body on
+purpose, and the warnings are the service correctly saying so.
 
 The API is available at `http://localhost:18080` (mapped to 8080 inside the
 container).
@@ -38,6 +54,7 @@ container).
 | Target | What it does |
 |--------|--------------|
 | `make build` | Build the dev image |
+| `make demo` | Walk the brief end to end against a running service |
 | `make test` | Run the EUnit suite |
 | `make bench` | Compare the ETS read path against a gen_server (see [DESIGN](DESIGN.md#concurrency)) |
 | `make bench-http` | Measure requests per second through cowboy (see [DESIGN](DESIGN.md#concurrency)) |
