@@ -46,9 +46,10 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=30s --retries=3 \
 # ---------------------------------------------------------------------------
 FROM base AS dev
 
-# Only the dev stage needs the suite. Keeping it out of base means editing a
-# test does not invalidate the release build below.
+# Only the dev stage needs these. Keeping them out of base means editing a
+# test or the benchmark does not invalidate the release build below.
 COPY test ./test
+COPY bench ./bench
 
 CMD ["rebar3", "shell"]
 

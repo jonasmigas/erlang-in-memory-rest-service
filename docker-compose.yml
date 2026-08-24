@@ -18,6 +18,7 @@ services:
       - ./src:/app/src
       - ./test:/app/test
       - ./config:/app/config
+      - ./bench:/app/bench
       # Compiled deps and beams live in a named volume, so a second
       # `make test` reuses them instead of recompiling from scratch.
       # Run `make clean` after changing rebar.config to drop stale ones.
