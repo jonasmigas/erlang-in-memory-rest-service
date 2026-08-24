@@ -103,8 +103,9 @@ schedulers:
 | 8       | ~9.5M     | ~0.53M           | ~18x  |
 
 The ratio is not the interesting part. This is: adding readers multiplies
-ETS throughput by roughly 2.3 to 3.3x across four cores depending on the
-run, and the gen_server by about 1.5x. One process handles one message at
+ETS throughput by roughly 2.3 to 3.8x across four cores depending on the
+run, and the gen_server by about 1.5x at best and sometimes less than
+one. One process handles one message at
 a time, so its total is close to flat no matter how many callers arrive —
 which is the whole argument, in a measurement rather than in prose.
 
@@ -137,6 +138,13 @@ comparison were secretly the same code — and duly measured the same. That
 is the hazard the README warns about under `make clean`, walked into
 anyway. `make bench` recompiles before it measures.
 
+The harness itself then had two of its own, both caught by a run whose
+scaling block contradicted the table above it. It measured everything
+twice and printed the two results as though they were one, and its memory
+rows charged the previous row's uncollected binaries to the next. Neither
+changed a conclusion, but both are why the figures here are given as
+ranges over runs rather than as single numbers.
+
 ### What this does not fix
 
 A large value is still copied to whoever reads it. Moving the read out of
@@ -145,7 +153,7 @@ client pulling a multi-megabyte entry still consumes CPU and allocator
 bandwidth every other request needs.
 
 Measured — one client looping over a 4MB value while small-key reads run
-alongside — throughput retained is roughly 54-56% with ETS against 40-45%
+alongside — throughput retained is roughly 53-61% with ETS against 36-49%
 through the GenServer, across several runs. Better, but both lose about
 half, so this is not the fix for that problem.
 
