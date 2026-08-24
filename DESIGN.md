@@ -33,8 +33,10 @@ The KV Store is built using Erlang/OTP with three main components:
 ### Supervision Tree
 
 - `kv_store_sup` (Supervisor)
-  - `kv_store` (GenServer) - owns the ETS table
-  - `kv_http` (Cowboy) - Handles HTTP requests
+  - `kv_store` (GenServer) - owns the ETS table holding the data
+  - `kv_metrics` (GenServer) - owns the counter table, started before the
+    listener so the table exists by the time a request can arrive
+  - `kv_http` (Cowboy) - handles HTTP requests
 
 `one_for_one` is deliberate: the listener keeps serving while the store
 restarts, and the store keeps its data while the listener restarts. The
@@ -60,17 +62,28 @@ cost is stated plainly under Durability.
 
 ### 3. ETS for the data, read outside the process
 
-The store began as a map held in the GenServer's state. That is the
-simplest thing that works, and for a single client it is fine. It has one
-property that does not survive contact with a real workload: every read
-was a message to one process and a wait for its reply, so reads queued
-behind each other and behind every write.
+ETS is the expected answer for an in-memory store in Erlang, so the choice
+itself is not the interesting part. Three decisions inside it are.
 
-The data now lives in an ETS table the GenServer owns — `protected`, so
-that process is still the only writer, with `read_concurrency` because
-reads are the point. `get/1` and `get_all/0` run in the calling process.
+**`protected`, not `public`.** The table is owned by the GenServer and
+nothing else may write to it, so "writes are serialised" is a property the
+table enforces rather than a convention every caller has to remember. It
+is also what keeps `insert_new/2` sufficient: with one writer, deciding
+created-versus-replaced and performing the write really is one operation.
 
-See Concurrency for what this is and is not measured to fix.
+**Reads run in the calling process.** `get/1` and `get_all/0` send no
+message to the store at all, with `read_concurrency` set because reads are
+the point. This is the one place the design departs from the shape a
+reader expects, and Concurrency below measures both what it buys and what
+it does not.
+
+**The table dies with its owner.** The data's lifetime is deliberately
+unchanged from when the state was a map, which is the subject of
+Durability.
+
+The map did come first, and every read was a message to one process that
+waited its turn behind every write. That is the design the figures below
+are measured against.
 
 ## Concurrency
 
@@ -118,8 +131,11 @@ change every verb timed out. `kv_store_tests` covers the other end — with
 no store running at all, `get/1` returns `{error, unavailable}` rather than
 crashing its caller.
 
-Correctness under load: 300 concurrent writes followed by 300 concurrent
-reads return 300/300 correct values, no 5xx.
+Correctness under load: `kv_http_tests` drives 300 concurrent writes
+followed by 300 concurrent reads, each writer sending a value derived from
+its own key, and asserts every reader gets its own value back -- 300/300,
+no 5xx. A crossed response fails the assertion rather than passing as a
+plain 200.
 
 ### What is not measured
 
