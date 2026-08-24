@@ -161,6 +161,46 @@ If it mattered, the answer is not more concurrency. It is not storing
 values large enough to care about, or handing back a reference instead of a
 copy.
 
+### Through HTTP, which is what a client actually sees
+
+Every figure above measures kv_store directly. None of them is what the
+service serves: between a client and the table sit a socket read, request
+parsing, routing, JSON decoding and encoding, and a socket write.
+`make bench-http` drives the real listener over persistent connections and
+measures that. On four cores, through Docker Desktop:
+
+| connections | GET req/s | PUT req/s |
+|-------------|-----------|-----------|
+| 1           | ~4.9k     | ~3.5k     |
+| 4           | ~16.0k    | ~13.0k    |
+| 16          | ~19.5k    | ~13.3k    |
+| 64          | ~24.0k    | ~13.2k    |
+
+Set beside the in-process numbers, the gap is the whole point:
+
+| | in kv_store | through HTTP | ratio |
+|---|---|---|---|
+| reads  | ~9M ops/s   | ~24k req/s | ~375x |
+| writes | ~460k ops/s | ~13k req/s | ~35x  |
+
+**The store is not the constraint. The HTTP layer is, by two orders of
+magnitude.** Everything the concurrency work above achieved -- reads that
+scale across cores, a write path that does not queue behind reads -- is
+real and is invisible from outside, because the request never gets near
+those limits.
+
+This is worth stating plainly because it changes what the earlier sections
+mean. Writes plateau at four connections and stay at roughly 13k however
+many more arrive, which is the serialisation showing through the
+transport; but it plateaus at 13k, not at 460k, so removing the
+serialisation would move a ceiling that nothing is pressing against.
+Sharding the store would be optimising the part that is already 35x
+faster than the part in front of it.
+
+If throughput ever needed to go up, the profitable places are in that
+gap -- fewer allocations per request, a cheaper JSON path, HTTP/2 or
+pipelining, more nodes behind a balancer -- and not in the store.
+
 ### Capacity
 
 `make bench` also measures what one entry costs, because "how many fit in a
