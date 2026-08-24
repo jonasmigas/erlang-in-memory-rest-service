@@ -1,24 +1,29 @@
 # KV Store - Design Document
 
-## Architecture Overview
+## Start here
 
-The KV Store is built using Erlang/OTP with three main components:
+This is longer than the brief needs. Three sections carry the argument and
+the rest is the reasoning behind them:
 
-**1. Cowboy HTTP Server (port 8080)**
-- Handles incoming HTTP requests
-- Routes requests to the appropriate handler
-- Returns JSON responses
+1. [**Reads do not go through the store process**](#concurrency). They run
+   in the caller, straight from ETS, so they neither queue behind writes
+   nor behind each other. Writes stay serialised deliberately.
+2. [**The HTTP layer is the bottleneck, not the store**](#through-http-which-is-what-a-client-actually-sees)
+   -- by about 17x on writes and 400x on reads, measured. That is why
+   there is no sharding here.
+3. [**What one entry costs**](#capacity), in bytes and in entries per GiB,
+   because that is what decides how many nodes a working set needs.
 
-**2. KV Store GenServer**
-- Owns an ETS table holding the data: `{Key, Value}`, keys are binaries
-- Provides: `set/2`, `get/1`, `delete/1`, `clear_all/0`, `get_all/0`
-- Runs as a supervised process
-- Serialises writes; reads run in the caller (see Concurrency below)
+The limits are stated as plainly as the capabilities:
+[no durability](#durability), [no authentication](#security), and
+[no expiry](#what-this-is-not-a-cache).
 
-**3. Supervisor (kv_store_sup)**
-- Strategy: `one_for_one`
-- Restarts the GenServer and HTTP server on crash
-- Provides fault tolerance
+## Architecture
+
+Cowboy answers HTTP on port 8080 and routes to one handler; a supervised
+GenServer owns an ETS table of `{Key, Value, Bytes}` and takes every
+write; reads go to the table directly. `set/2`, `get/1`, `delete/1`,
+`clear_all/0` and `get_all/0` are the whole store API.
 
 ### Request Flow
 
@@ -325,6 +330,42 @@ fits here, since every operation names exactly one key and nothing spans
 two — there are no multi-key transactions to break. What it costs is that
 `get_all/0` and `clear_all/0` stop being single answers.
 
+### What this is not: a cache
+
+Nothing here expires. There is no TTL on an entry and no eviction when the
+table fills -- `max_bytes` refuses the write instead, with `507`. That is
+the right behaviour for a store of record, where losing an entry the
+client believes is stored is worse than refusing a new one, and it is the
+wrong behaviour for a cache, where the opposite holds.
+
+The brief asks for a key-value store and says nothing about expiry, so
+this is the shape it was built to. It is worth naming rather than leaving
+implicit, because plenty of workloads that reach for an in-memory store --
+sessions, tokens, anything with a natural lifetime -- want the other
+behaviour, and would be quietly broken by a store that keeps everything
+until it refuses to keep any more.
+
+Two ways to change it, if a workload needed it:
+
+**A TTL per entry.** The row already carries a third element, so a fourth
+holding an expiry timestamp costs one word. Reads would have to check it
+-- which puts a comparison on the hot path that currently has none -- and
+something has to reclaim the space, since a key nobody reads again is
+never noticed. A periodic sweep with `ets:select_delete/2` over expired
+rows is the usual answer, and it trades a predictable stall against
+memory held past its usefulness.
+
+**LRU eviction at the ceiling.** Instead of refusing at `max_bytes`, evict
+until the write fits. This needs recency, which this design deliberately
+does not track: a read touches no shared state at all, which is exactly
+what makes reads scale here. Recording recency would put a write on the
+read path and undo that. The usual escapes are approximation -- sampling a
+few keys and evicting the oldest, as Redis does -- or accepting a segmented
+structure and the write it costs.
+
+Both are real work with real trade-offs against the read path, which is
+why neither is here rather than half-here.
+
 ### Why in-process rather than Redis or Memcached
 
 The brief asks for an in-memory store, and this is one — it is the cache,
@@ -447,9 +488,9 @@ In the order worth doing them:
    only a per-client one stops them crowding everyone else out of it.
 4. **Audit logging** of writes and deletes, which also needs identity to
    be worth anything.
-5. **Eviction**. The ceiling refuses new writes rather than making room,
-   which is right for a store of record and wrong for a cache. An LRU is
-   the usual answer and needs a recency structure this does not keep.
+5. **Eviction**, so a full store degrades instead of refusing. Covered
+   under [what this is not](#what-this-is-not-a-cache), including why the
+   recency it needs would cost the read path.
 
 ## API Design
 
