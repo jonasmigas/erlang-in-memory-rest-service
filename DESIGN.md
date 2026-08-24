@@ -120,8 +120,11 @@ change every verb timed out. `kv_store_tests` covers the other end — with
 no store running at all, `get/1` returns `{error, unavailable}` rather than
 crashing its caller.
 
-Correctness under load: 300 concurrent writes followed by 300 concurrent
-reads return 300/300 correct values, no 5xx.
+Correctness under load: `kv_http_tests` drives 300 concurrent writes
+followed by 300 concurrent reads, each writer sending a value derived from
+its own key, and asserts every reader gets its own value back -- 300/300,
+no 5xx. A crossed response fails the assertion rather than passing as a
+plain 200.
 
 ### What is not measured
 
