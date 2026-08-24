@@ -104,12 +104,20 @@ drive(Sock, Req, N) ->
 %% packet mode, then content-length bytes of body.
 recv_response(Sock) ->
     ok = inet:setopts(Sock, [{packet, http_bin}]),
-    {ok, {http_response, _, _Status, _}} = gen_tcp:recv(Sock, 0, 10000),
+    {ok, {http_response, _, Status, _}} = gen_tcp:recv(Sock, 0, 10000),
     Length = headers(Sock, 0),
     ok = inet:setopts(Sock, [{packet, raw}]),
     case Length of
         0 -> ok;
         _ -> {ok, _} = gen_tcp:recv(Sock, Length, 10000), ok
+    end,
+    %% Check what came back, not merely that something did. Discarding the
+    %% status leaves the harness unable to tell a stored value from a
+    %% mistyped path, and a run measuring how fast the service refuses work
+    %% looks exactly like a run measuring the work.
+    case Status >= 200 andalso Status < 300 of
+        true -> ok;
+        false -> error({unexpected_status, Status})
     end.
 
 headers(Sock, Length) ->
