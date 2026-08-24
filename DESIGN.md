@@ -314,6 +314,15 @@ the serialisation is possible and is described below, but it should be
 done because a measurement says the ceiling is being approached, not
 because a graph flattens.
 
+The same figures set the write timeout. A write waits one second for the
+store and is then reported as `503`, which is load shedding rather than a
+safety margin -- reads never enter the mailbox, so writes are the only
+operation that can queue at all. Against a store that serves 300k a
+second, a write it has not reached within one is not running late; it is
+behind a queue that is not draining. The previous five seconds bought
+nothing for that case and let a thousand connections' worth of doomed
+requests wait out a five-second wall before failing anyway.
+
 Two ways to remove it if it ever matters. Writes could go straight to a
 public table with `write_concurrency`, since `ets:insert_new/2` is itself
 atomic and answers created-vs-updated on its own -- at the cost of a

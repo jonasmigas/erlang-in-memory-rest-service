@@ -26,16 +26,9 @@
 %% before its payload. Without it a million tiny keys would look free.
 -define(ENTRY_OVERHEAD, 200).
 
-%% How long a write waits for the store before the HTTP layer calls it a
-%% 503. This is a load-shedding decision, not a safety margin: writes are
-%% the only operation that queues, since reads never enter the mailbox.
-%%
-%% `make bench-http` puts the service at fifteen to nineteen thousand
-%% writes a second and `make bench` puts the store near 300k, so a write
-%% the store has not reached within a second is not late -- it is behind a
-%% queue that is not draining. Waiting five seconds for it only let 1024
-%% connections' worth of doomed requests pile up behind a five-second wall
-%% before failing anyway.
+%% How long a write waits before the HTTP layer reports 503. Load
+%% shedding, not a safety margin -- DESIGN.md, "Where one node stops",
+%% has the measurements that set it.
 -define(DEFAULT_CALL_TIMEOUT, 1000).
 
 %% Overridable so a deployment on slower hardware -- or a test -- can
@@ -76,31 +69,11 @@ set(<<>>, _Value) ->
 set(Key, Value) ->
     gen_server:call(?MODULE, {set, Key, Value}, call_timeout()).
 
-%% Read in the calling process, straight from ETS, rather than sending a
-%% message to the store and waiting.
-%%
-%% The reason is availability, not speed. A gen_server handles one
-%% message at a time, so every read queued behind every other request and
-%% behind every write: one slow or wedged caller stalled all of them, and
-%% a busy store turned reads into timeouts. Reading from the table
-%% removes reads from that queue entirely -- kv_http_tests proves it,
-%% by suspending the store process and watching reads keep answering
-%% while writes correctly report 503.
-%%
-%% It should also let reads use more than one core, since ETS reads run
-%% concurrently while a process cannot. That is the standard reason to
-%% do this, but it is not measured here: throughput on this setup varied
-%% by 3x between identical runs, which is not a basis for a number.
-%%
-%% What it does NOT fix: a large value is still copied to the caller, so
-%% one client pulling a big entry still costs the whole node CPU and
-%% allocator bandwidth. Measured, that degrades small-key reads about
-%% the same either way.
-%%
-%% The table is `protected` and owned by the gen_server, so writes stay
-%% serialised there and this cannot race with them; it also means the
-%% table dies with the store, which keeps the existing durability
-%% semantics rather than quietly changing them.
+%% Runs in the calling process, straight from the table: a read sends no
+%% message to the store and so cannot queue behind a write or behind
+%% another read. The table is `protected`, so this cannot race the writer
+%% either. DESIGN.md, "Concurrency", has the argument and the numbers,
+%% including what this does not fix.
 -spec get(binary()) ->
     {ok, binary(), any()} | {error, not_found | invalid_key | unavailable}.
 get(<<>>) ->

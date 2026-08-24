@@ -363,16 +363,10 @@ extract_key(Req) ->
             end
     end.
 
-%% A key has to survive the round trip: the client reads it out of a
-%% response and puts it back in a path. Two things break that.
-%%
-%% Bytes that are not valid UTF-8 cannot be a JSON string, so jsx encodes
-%% them as U+FFFD -- /store/%FF and /store/%FE both reported the key as
-%% "�", and asking for that back was a third, missing key.
-%%
-%% Dot segments are removed by cowboy's router before a binding exists,
-%% so a key of "." or ".." was writable through the body form and then
-%% unreachable and undeletable through the path.
+%% A key has to survive the round trip out through a response and back in
+%% through a path. Non-UTF-8 bytes and the dot segments cannot; README's
+%% API section states the rule, and unusable_keys/0 in kv_http_tests
+%% covers each case.
 -spec valid_key(binary()) -> boolean().
 valid_key(<<>>) -> false;
 valid_key(<<".">>) -> false;
