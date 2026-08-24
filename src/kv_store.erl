@@ -13,9 +13,19 @@
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -define(TABLE, kv_store_table).
--define(DEFAULT_CALL_TIMEOUT, 5000).
+%% How long a write waits for the store before the HTTP layer calls it a
+%% 503. This is a load-shedding decision, not a safety margin: writes are
+%% the only operation that queues, since reads never enter the mailbox.
+%%
+%% `make bench-http` puts the service at fifteen to nineteen thousand
+%% writes a second and the store itself at around 460k, so a write the
+%% store has not reached within a second is not late -- it is behind a
+%% queue that is not draining. Waiting five seconds for it only let 1024
+%% connections' worth of doomed requests pile up behind a five-second wall
+%% before failing anyway.
+-define(DEFAULT_CALL_TIMEOUT, 1000).
 
-%% Overridable so a caller that must answer quickly -- or a test -- can
+%% Overridable so a deployment on slower hardware -- or a test -- can
 %% bound how long it waits on a busy store.
 call_timeout() ->
     application:get_env(kv_store, call_timeout, ?DEFAULT_CALL_TIMEOUT).
