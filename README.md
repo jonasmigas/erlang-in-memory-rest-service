@@ -100,7 +100,8 @@ make up HOST_PORT=19090
 
 ## API
 
-All requests and responses are JSON. Ports below assume the non-Docker run
+All requests and responses are JSON, except `/metrics`, which answers in
+the Prometheus text format a scraper already speaks. Ports below assume the non-Docker run
 on 8080; under Docker (`make up`) use 18080.
 
 | Method | Endpoint | Request body | Success | Errors |
@@ -111,6 +112,7 @@ on 8080; under Docker (`make up`) use 18080.
 | `PUT` | `/store/:key` | `{"value": ...}` | `201` created / `200` replaced | `400`, `408`, `413` |
 | `DELETE` | `/store/:key` | — | `204` | `404` `key_not_found` |
 | `GET` | `/health` | — | `200` `{"status":"ok",...}` | — |
+| `GET` | `/metrics` | — | `200` Prometheus text | — |
 
 `HEAD` is accepted wherever `GET` is, and returns the same status with no
 body.
