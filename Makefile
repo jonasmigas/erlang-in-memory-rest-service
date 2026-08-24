@@ -55,7 +55,7 @@ logs:
 # Uses the container's own wget rather than a host curl, so the target holds
 # to the docker-only promise at the top of this file.
 health:
-	@$(COMPOSE) exec -T $(SERVICE) wget -qO- http://localhost:8080/health
+	@$(COMPOSE) exec -T $(SERVICE) wget -qO- http://127.0.0.1:8080/health
 	@echo ""
 
 # Builds only the runtime stage: the release, without rebar3 or the compiler.
@@ -71,7 +71,7 @@ release:
 smoke:
 	-@docker rm -f kv-smoke >/dev/null 2>&1
 	@docker run -d --name kv-smoke $(RELEASE_IMAGE) >/dev/null
-	@docker exec kv-smoke sh -c 'i=0; until wget -qO- "http://localhost:$$APP_PORT/health"; do i=$$((i+1)); [ $$i -lt 30 ] || exit 1; sleep 1; done' >/dev/null 2>&1 || { echo "smoke: $(RELEASE_IMAGE) did not serve /health"; docker logs kv-smoke 2>&1 | tail -20; docker rm -f kv-smoke >/dev/null 2>&1; exit 1; }
+	@docker exec kv-smoke sh -c 'i=0; until wget -qO- "http://127.0.0.1:$$APP_PORT/health"; do i=$$((i+1)); [ $$i -lt 30 ] || exit 1; sleep 1; done' >/dev/null 2>&1 || { echo "smoke: $(RELEASE_IMAGE) did not serve /health"; docker logs kv-smoke 2>&1 | tail -20; docker rm -f kv-smoke >/dev/null 2>&1; exit 1; }
 	-@docker rm -f kv-smoke >/dev/null 2>&1
 	@echo "smoke: $(RELEASE_IMAGE) booted and served /health"
 

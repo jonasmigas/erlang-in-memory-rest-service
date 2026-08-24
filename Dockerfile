@@ -34,8 +34,12 @@ RUN rebar3 compile
 
 EXPOSE ${APP_PORT}
 
+# 127.0.0.1, not localhost: /etc/hosts maps localhost to both 127.0.0.1
+# and ::1, the listener binds IPv4 only, and which of the two a resolver
+# hands back first is not ours to decide. Where it answers ::1 the probe
+# gets "Address not available" and reports a healthy service as down.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=30s --retries=3 \
-    CMD wget -qO- "http://localhost:${APP_PORT}/health" || exit 1
+    CMD wget -qO- "http://127.0.0.1:${APP_PORT}/health" || exit 1
 
 # ---------------------------------------------------------------------------
 # dev: what docker-compose runs -- rebar3 on hand for eunit and the shell
@@ -78,7 +82,7 @@ USER kv
 EXPOSE ${APP_PORT}
 
 HEALTHCHECK --interval=30s --timeout=3s --start-period=15s --retries=3 \
-    CMD wget -qO- "http://localhost:${APP_PORT}/health" || exit 1
+    CMD wget -qO- "http://127.0.0.1:${APP_PORT}/health" || exit 1
 
 # -kv_store port overrides the sys.config value, so APP_PORT drives the bind,
 # the probe and EXPOSE together rather than each carrying its own literal.
