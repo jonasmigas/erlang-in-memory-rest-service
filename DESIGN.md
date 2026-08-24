@@ -149,6 +149,63 @@ If it mattered, the answer is not more concurrency. It is not storing
 values large enough to care about, or handing back a reference instead of a
 copy.
 
+### Capacity
+
+`make bench` also measures what one entry costs, because "how many fit in a
+node" is what decides whether one node is the answer at all. Keys of 14
+bytes, 20,000 entries per row, measured rather than estimated:
+
+| value | ETS bytes/entry | VM bytes/entry | entries per GiB |
+|-------|-----------------|----------------|-----------------|
+| 16 B  | 144             | 217            | ~4.95M          |
+| 64 B  | 144             | 264            | ~4.07M          |
+| 256 B | 144             | 456            | ~2.35M          |
+| 1 KiB | 144             | 1224           | ~0.88M          |
+
+Two columns because they answer different questions, and taking only the
+first would flatter the result badly. A value over 64 bytes is a refcounted
+binary on the shared heap, so the table holds a pointer and its own figure
+stays flat at 144 bytes no matter how large the value gets. The VM total
+counts the binary too, and that is the number that fills a machine.
+
+The rule that falls out: **roughly 200 bytes of overhead per entry, plus the
+value.** So a 16 GiB node with headroom for the VM and the network stack
+holds on the order of 10M entries at 1 KiB each, or tens of millions of
+small ones. Doubling the key size moves it; the shape does not.
+
+### Where one node stops
+
+Memory is the first ceiling and the easiest to reason about — the table
+above says where it is for a given value size.
+
+The second is writes. They still go through one process by design, because
+that is what makes created-vs-updated atomic. The gen_server column in the
+throughput table is what that path costs: a few hundred thousand operations
+a second, and close to flat as callers are added. Reads no longer share
+that limit; writes do. This has not been measured directly for writes, and
+the read figure is being used as a proxy for the same mechanism.
+
+Past either ceiling the answer is more nodes, and then the question is how
+keys are divided. Consistent hashing over the key is the usual choice and
+fits here, since every operation names exactly one key and nothing spans
+two — there are no multi-key transactions to break. What it costs is that
+`get_all/0` and `clear_all/0` stop being single answers.
+
+### Why in-process rather than Redis or Memcached
+
+The brief asks for an in-memory store, and this is one — it is the cache,
+not a service in front of one. Keeping it in-process buys the numbers
+above: an ETS read is well under a microsecond in the calling process,
+where a Redis round trip is tens to hundreds of microseconds on a good
+network. That is two to three orders of magnitude, and it is the kind of
+difference that changes what the code above it can afford to do per
+request.
+
+What would change the answer: state that must outlive a process restart
+(see Durability), state shared by several nodes, or a working set past one
+machine. Any of those and an external store earns its network hop, and the
+hop is the cost being accepted — not a detail.
+
 ### Durability
 
 There is none, by design: the brief asks for an in-memory store. The table

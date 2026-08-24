@@ -20,7 +20,7 @@
 %%%-------------------------------------------------------------------
 -module(kv_bench).
 
--export([main/0, main/1]).
+-export([main/0, main/1, capacity/0]).
 
 -define(KEY, <<"bench_key">>).
 -define(VALUE, <<"a small value, so the mechanism is what is measured">>).
@@ -50,6 +50,7 @@ main(#{reads := Reads, rounds := Rounds, concurrency := Levels}) ->
     scaling(Reads, Rounds, Levels),
 
     contention(Rounds),
+    capacity(),
 
     kv_bench_map:stop(),
     ok.
@@ -82,6 +83,49 @@ scaling(Reads, Rounds, Levels) ->
               io:format("  ~w process(es): ETS ~.2fx   gen_server ~.2fx~n",
                         [C, E / Ets1, M / Map1])
       end, Medians).
+
+%% What one entry costs, measured rather than estimated, because
+%% "how many fit in a node" is the question that decides whether one node
+%% is the answer at all.
+%%
+%% Two numbers, because they answer different questions. ETS reports what
+%% the table itself holds; a value over 64 bytes is a refcounted binary
+%% living on the shared heap, so the table only holds a pointer to it and
+%% ets:info/2 alone would flatter the result badly. The VM total catches
+%% the binary as well, and that is the one that fills a machine.
+capacity() ->
+    io:format("~nMemory per entry, ~p-byte keys~n", [byte_size(cap_key(1))]),
+    io:format("  ~8s ~12s ~12s ~16s~n",
+              ["value", "ets b/entry", "vm b/entry", "entries per GiB"]),
+    lists:foreach(fun cap_row/1, [16, 64, 256, 1024]).
+
+cap_row(ValueSize) ->
+    ok = kv_store:clear_all(),
+    _ = erlang:garbage_collect(),
+    EtsBefore = ets_bytes(),
+    VmBefore = erlang:memory(total),
+    N = 20000,
+    Filler = binary:copy(<<"v">>, ValueSize),
+    lists:foreach(
+      fun(I) ->
+              %% Each value is its own binary. Storing one shared binary
+              %% N times would measure a pointer N times and report a
+              %% number no real workload could reproduce.
+              Value = <<(integer_to_binary(I))/binary, Filler/binary>>,
+              {ok, _} = kv_store:set(cap_key(I), Value)
+      end, lists:seq(1, N)),
+    _ = erlang:garbage_collect(),
+    EtsPer = (ets_bytes() - EtsBefore) / N,
+    VmPer = (erlang:memory(total) - VmBefore) / N,
+    io:format("  ~8w ~12w ~12w ~16w~n",
+              [ValueSize, round(EtsPer), round(VmPer),
+               round((1024 * 1024 * 1024) / erlang:max(VmPer, 1))]).
+
+cap_key(I) ->
+    <<"player:", (integer_to_binary(1000000 + I))/binary>>.
+
+ets_bytes() ->
+    ets:info(kv_store_table, memory) * erlang:system_info(wordsize).
 
 %% Does one client reading a large value hurt everybody else, and does
 %% reading outside the process change that? The copy still happens either
