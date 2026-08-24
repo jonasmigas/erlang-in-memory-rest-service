@@ -26,7 +26,7 @@
 %% about 1.7 million requests, which is not a hang but looks exactly like
 %% one from outside.
 main() ->
-    main(#{requests => 500, rounds => 3, connections => [1, 4, 16, 64]}).
+    main(#{requests => 500, rounds => 5, connections => [1, 4, 16, 64]}).
 
 main(#{requests := N, rounds := Rounds, connections := Levels}) ->
     {ok, _} = application:ensure_all_started(kv_store),
@@ -40,12 +40,14 @@ main(#{requests := N, rounds := Rounds, connections := Levels}) ->
     %% Warm the path so round one does not pay for first-call work.
     _ = run(get, Port, 4, 200),
 
-    io:format("~-6s ~14s ~14s~n", ["conns", "GET req/s", "PUT req/s"]),
+    io:format("~-6s ~12s ~17s ~12s ~17s~n",
+              ["conns", "GET req/s", "GET (min-max)", "PUT req/s", "PUT (min-max)"]),
     lists:foreach(
       fun(C) ->
-              Gets = median([run(get, Port, C, N) || _ <- lists:seq(1, Rounds)]),
-              Puts = median([run(put, Port, C, N) || _ <- lists:seq(1, Rounds)]),
-              io:format("~-6w ~14w ~14w~n", [C, Gets, Puts])
+              Gets = [run(get, Port, C, N) || _ <- lists:seq(1, Rounds)],
+              Puts = [run(put, Port, C, N) || _ <- lists:seq(1, Rounds)],
+              io:format("~-6w ~12w ~17s ~12w ~17s~n",
+                        [C, median(Gets), spread(Gets), median(Puts), spread(Puts)])
       end, Levels),
     halt(0).
 
@@ -136,3 +138,11 @@ request(put, W) ->
 median(Xs) ->
     Sorted = lists:sort(Xs),
     lists:nth((length(Sorted) div 2) + 1, Sorted).
+
+%% Printed beside every median for the same reason kv_bench prints it: this
+%% is a laptop running Docker Desktop, rounds vary by more than the effects
+%% being described, and a bare median hides that. The first version of this
+%% harness reported medians alone, and DESIGN.md duly grew a table of single
+%% figures and a plateau that a second run did not reproduce.
+spread(Xs) ->
+    io_lib:format("~w - ~w", [lists:min(Xs), lists:max(Xs)]).
