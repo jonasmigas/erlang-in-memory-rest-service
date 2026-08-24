@@ -42,12 +42,18 @@ main(#{reads := Reads, rounds := Rounds, concurrency := Levels}) ->
     _ = time_run(fun read_ets/1, 2, 2000),
     _ = time_run(fun read_map/1, 2, 2000),
 
+    %% Measure once. Reporting the table and the scaling from separate
+    %% passes let them contradict each other -- a run where the table
+    %% climbed to 8M ops/s printed "2 processes: 0.63x" underneath it,
+    %% because that line came from a different set of measurements.
+    Measured = [{C, rounds(C, Reads, Rounds)} || C <- Levels],
+
     io:format("~-6s ~12s ~12s ~9s   ~s~n",
               ["procs", "ETS ops/s", "gen ops/s", "ratio", "ETS spread (min-max)"]),
-    lists:foreach(fun(C) -> report(C, Reads, Rounds) end, Levels),
+    lists:foreach(fun report/1, Measured),
 
-    io:format("~nScaling from 1 process, median ops/s:~n"),
-    scaling(Reads, Rounds, Levels),
+    io:format("~nScaling from 1 process, same measurements:~n"),
+    scaling(Measured),
 
     contention(Rounds),
     capacity(),
@@ -55,8 +61,7 @@ main(#{reads := Reads, rounds := Rounds, concurrency := Levels}) ->
     kv_bench_map:stop(),
     ok.
 
-report(C, Reads, Rounds) ->
-    {Ets, Map, Ratios} = rounds(C, Reads, Rounds),
+report({C, {Ets, Map, Ratios}}) ->
     io:format("~-6w ~12w ~12w ~9s   ~w - ~w~n",
               [C, median(Ets), median(Map),
                io_lib:format("~.2fx", [median_f(Ratios)]),
@@ -74,9 +79,8 @@ rounds(C, Reads, Rounds) ->
      [M || {_, M, _} <- Results],
      [R || {_, _, R} <- Results]}.
 
-scaling(Reads, Rounds, Levels) ->
-    Medians = [{C, begin {E, M, _} = rounds(C, Reads, Rounds),
-                         {median(E), median(M)} end} || C <- Levels],
+scaling(Measured) ->
+    Medians = [{C, {median(E), median(M)}} || {C, {E, M, _}} <- Measured],
     [{_, {Ets1, Map1}} | _] = Medians,
     lists:foreach(
       fun({C, {E, M}}) ->
@@ -101,7 +105,7 @@ capacity() ->
 
 cap_row(ValueSize) ->
     ok = kv_store:clear_all(),
-    _ = erlang:garbage_collect(),
+    settle(),
     EtsBefore = ets_bytes(),
     VmBefore = erlang:memory(total),
     N = 20000,
@@ -114,12 +118,37 @@ cap_row(ValueSize) ->
               Value = <<(integer_to_binary(I))/binary, Filler/binary>>,
               {ok, _} = kv_store:set(cap_key(I), Value)
       end, lists:seq(1, N)),
-    _ = erlang:garbage_collect(),
+    settle(),
     EtsPer = (ets_bytes() - EtsBefore) / N,
     VmPer = (erlang:memory(total) - VmBefore) / N,
     io:format("  ~8w ~12w ~12w ~16w~n",
               [ValueSize, round(EtsPer), round(VmPer),
                round((1024 * 1024 * 1024) / erlang:max(VmPer, 1))]).
+
+%% A value over 64 bytes is a refcounted binary on a shared heap, and
+%% dropping it from the table does not reclaim it there and then.
+%% erlang:garbage_collect/0 collects only the calling process, so the
+%% previous row's garbage was still counted against the next row's
+%% baseline: one run had 256-byte values reporting the same cost per
+%% entry as 16-byte ones, which is the tell. Collect everywhere and wait
+%% for the total to stop moving before taking a reading.
+settle() ->
+    collect_all(),
+    settle(erlang:memory(total), 20).
+
+settle(_Prev, 0) ->
+    ok;
+settle(Prev, N) ->
+    timer:sleep(50),
+    collect_all(),
+    Now = erlang:memory(total),
+    case abs(Now - Prev) < 65536 of
+        true -> ok;
+        false -> settle(Now, N - 1)
+    end.
+
+collect_all() ->
+    lists:foreach(fun(P) -> erlang:garbage_collect(P) end, processes()).
 
 cap_key(I) ->
     <<"player:", (integer_to_binary(1000000 + I))/binary>>.
