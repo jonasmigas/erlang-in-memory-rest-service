@@ -62,17 +62,28 @@ cost is stated plainly under Durability.
 
 ### 3. ETS for the data, read outside the process
 
-The store began as a map held in the GenServer's state. That is the
-simplest thing that works, and for a single client it is fine. It has one
-property that does not survive contact with a real workload: every read
-was a message to one process and a wait for its reply, so reads queued
-behind each other and behind every write.
+ETS is the expected answer for an in-memory store in Erlang, so the choice
+itself is not the interesting part. Three decisions inside it are.
 
-The data now lives in an ETS table the GenServer owns — `protected`, so
-that process is still the only writer, with `read_concurrency` because
-reads are the point. `get/1` and `get_all/0` run in the calling process.
+**`protected`, not `public`.** The table is owned by the GenServer and
+nothing else may write to it, so "writes are serialised" is a property the
+table enforces rather than a convention every caller has to remember. It
+is also what keeps `insert_new/2` sufficient: with one writer, deciding
+created-versus-replaced and performing the write really is one operation.
 
-See Concurrency for what this is and is not measured to fix.
+**Reads run in the calling process.** `get/1` and `get_all/0` send no
+message to the store at all, with `read_concurrency` set because reads are
+the point. This is the one place the design departs from the shape a
+reader expects, and Concurrency below measures both what it buys and what
+it does not.
+
+**The table dies with its owner.** The data's lifetime is deliberately
+unchanged from when the state was a map, which is the subject of
+Durability.
+
+The map did come first, and every read was a message to one process that
+waited its turn behind every write. That is the design the figures below
+are measured against.
 
 ## Concurrency
 
