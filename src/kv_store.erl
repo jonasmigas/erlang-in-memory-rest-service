@@ -113,10 +113,16 @@ handle_call({set, Key, Value}, _From, T) ->
             updated
     end,
     {reply, {ok, Outcome}, T};
+%% ets:take/2 removes the entry and reports what was there in one
+%% operation, so telling a delete from a miss does not depend on nothing
+%% happening between a member/2 and a delete/2. It only ever ran here, with
+%% one writer, so the old pair was safe -- but it was safe by virtue of the
+%% serialisation rather than on its own, which is exactly the difference
+%% insert_new/2 already avoids on the write side.
 handle_call({delete, Key}, _From, T) ->
-    case ets:member(T, Key) of
-        true -> true = ets:delete(T, Key), {reply, ok, T};
-        false -> {reply, {error, not_found}, T}
+    case ets:take(T, Key) of
+        [_Entry] -> {reply, ok, T};
+        [] -> {reply, {error, not_found}, T}
     end;
 handle_call(clear_all, _From, T) ->
     true = ets:delete_all_objects(T),
