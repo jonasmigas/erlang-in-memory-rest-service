@@ -80,6 +80,7 @@ http_test_() ->
       {"a body that never arrives is a 408, not a 413",
        {timeout, 30, fun slow_body_is_a_timeout/0}},
       {"a body over the cap is still a 413", {timeout, 30, fun oversized_body/0}},
+      {"a write past the store's ceiling is a 507", fun store_full_is_507/0},
       {"a key that cannot round-trip is rejected", fun unusable_keys/0},
       {"a created resource says where it went", fun created_has_location/0},
       {"a body with no value says so, either way",
@@ -382,6 +383,23 @@ oversized_body() ->
     ?assertMatch({413, #{<<"error">> := <<"request_too_large">>}},
                  request(put, "/store/toobig", binary_to_list(Body))),
     ?assertMatch({404, _}, request(get, "/store/toobig")).
+
+%% 413 and 507 are different refusals and a client has to tell them apart:
+%% 413 means this request was too big, 507 means the store has no room for
+%% it. Retrying helps only after something is deleted.
+store_full_is_507() ->
+    ok = application:set_env(kv_store, max_bytes, 4000),
+    try
+        Big = lists:duplicate(5000, $x),
+        {Status, Body} = request(put, "/store/toobig",
+                                 "{\"value\": \"" ++ Big ++ "\"}"),
+        ?assertEqual(507, Status),
+        ?assertEqual(<<"store_full">>, maps:get(<<"error">>, Body)),
+        %% and the key was never created
+        ?assertMatch({404, _}, request(get, "/store/toobig"))
+    after
+        application:unset_env(kv_store, max_bytes)
+    end.
 
 unusable_keys() ->
     %% A client reads a key out of a response and puts it back in a URL.

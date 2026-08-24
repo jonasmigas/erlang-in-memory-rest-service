@@ -221,8 +221,12 @@ stays flat at 144 bytes no matter how large the value gets. The VM total
 counts the binary too, and that is the number that fills a machine.
 
 The rule that falls out: **roughly 200 bytes of overhead per entry, plus the
-value.** So a 16 GiB node with headroom for the VM and the network stack
-holds on the order of 10M entries at 1 KiB each, or tens of millions of
+value.** That 200 is not only a figure in this table -- it is what
+`kv_store` charges each entry against `max_bytes`, so the ceiling an
+operator sets is in the same units this measured.
+
+So a 16 GiB node with headroom for the VM and the network stack holds on
+the order of 10M entries at 1 KiB each, or tens of millions of
 small ones. Doubling the key size moves it; the shape does not.
 
 ### Where one node stops
@@ -342,6 +346,10 @@ that are simply absent.
   single client can neither submit unbounded input nor hold a connection
   open indefinitely sending nothing.
 - Keys are validated at the boundary, so nothing unaddressable is stored.
+- The store is bounded. `max_bytes` (1 GiB by default) is a ceiling on
+  what the table may hold, and a write past it is refused with `507`
+  rather than taken. The running total is kept exactly, which costs
+  nothing only because writes are already serialised through one process.
 - ranch caps concurrent connections at 1024, its default, unchanged.
 
 ### What is absent
@@ -353,11 +361,17 @@ on `0.0.0.0`. There is no rate limiting beyond that connection cap, and no
 audit trail: a successful delete leaves a counter increment and nothing
 else.
 
-The sharpest edge is the combination of no authentication and no quota.
-Capacity above puts a node at roughly 5M small entries per GiB, and
-nothing stops one client walking to that number. Memory exhaustion is the
-cheapest denial of service available here and it requires no cleverness --
-just a loop.
+The sharpest edge is the lack of authentication. Anyone who can reach the
+port can delete or overwrite anything, and nothing records that they did.
+
+Until recently it was worse: with no ceiling on the table, one client
+looping on writes could take the node down entirely, which needed no
+cleverness and no attacker -- a bug would do. `max_bytes` now bounds that
+to filling the store rather than killing the process, so the failure is a
+node that refuses writes and keeps serving reads. That is still a denial
+of service, and per-client quotas are the fix, which needs identity, which
+needs authentication -- so it stays on the list below rather than being
+claimed as solved.
 
 ### What this assumes
 
@@ -371,15 +385,19 @@ enforces it.
 
 In the order worth doing them:
 
-1. **A quota** -- entries or bytes, rejecting or evicting past a
-   threshold. It comes first because it is the only failure on this list
-   that needs no attacker, just a busy client with a loop.
-2. **Authentication**, at the edge or as a token check in the handler.
-   Cheap, and it makes the rest of this list meaningful.
-3. **TLS**, via `cowboy_tls` or terminated in front.
-4. **Per-client rate limiting**, which needs identity, so it follows 2.
-5. **Audit logging** of writes and deletes, which also needs identity to
+1. **Authentication**, at the edge or as a token check in the handler.
+   Cheap, and it makes the rest of this list meaningful. It is first now
+   that the store is bounded; before that, a ceiling was, because that
+   failure needed no attacker at all.
+2. **TLS**, via `cowboy_tls` or terminated in front.
+3. **Per-client quotas and rate limiting**. Both need identity, so they
+   follow 1. The node-wide ceiling stops one client killing the process;
+   only a per-client one stops them crowding everyone else out of it.
+4. **Audit logging** of writes and deletes, which also needs identity to
    be worth anything.
+5. **Eviction**. The ceiling refuses new writes rather than making room,
+   which is right for a store of record and wrong for a cache. An LRU is
+   the usual answer and needs a recency structure this does not keep.
 
 ## API Design
 
