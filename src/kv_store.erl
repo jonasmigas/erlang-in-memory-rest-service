@@ -13,6 +13,19 @@
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2, code_change/3]).
 
 -define(TABLE, kv_store_table).
+
+%% Ceiling on what the store may hold, in bytes. An in-memory store with
+%% no ceiling is a memory leak with an API: nothing else here stops one
+%% client looping on writes until the node dies, and that attack needs no
+%% cleverness. `infinity` disables it -- integers sort before atoms in
+%% Erlang's term order, so the comparisons below need no special case.
+-define(DEFAULT_MAX_BYTES, 1073741824).  %% 1 GiB
+
+%% Charged per entry on top of key and value, from the measurement in
+%% DESIGN.md: an entry costs roughly 200 bytes of table and VM overhead
+%% before its payload. Without it a million tiny keys would look free.
+-define(ENTRY_OVERHEAD, 200).
+
 %% How long a write waits for the store before the HTTP layer calls it a
 %% 503. This is a load-shedding decision, not a safety margin: writes are
 %% the only operation that queues, since reads never enter the mailbox.
@@ -30,6 +43,21 @@
 call_timeout() ->
     application:get_env(kv_store, call_timeout, ?DEFAULT_CALL_TIMEOUT).
 
+%% Set from the memory the node actually has: the capacity table in
+%% DESIGN.md turns a byte figure into an entry count for a given value
+%% size.
+max_bytes() ->
+    application:get_env(kv_store, max_bytes, ?DEFAULT_MAX_BYTES).
+
+%% What one entry is charged. external_size/1 measures the term's
+%% external representation, which tracks the payload closely for the
+%% JSON-derived data this stores and costs a pass over it without
+%% allocating. It is not the allocator's own accounting -- DESIGN.md's
+%% capacity section explains why that is not available cheaply -- so this
+%% is a budget, not a memory reading.
+entry_bytes(Key, Value) ->
+    byte_size(Key) + erlang:external_size(Value) + ?ENTRY_OVERHEAD.
+
 %% ===================================================================
 %% API functions
 %% ===================================================================
@@ -41,7 +69,8 @@ start_link() ->
 %% Reports whether the key was created or overwritten, so the HTTP layer
 %% can answer 201 or 200 without a read-then-write across two calls --
 %% which would race, and defeat the point of serialising here.
--spec set(binary(), any()) -> {ok, created | updated} | {error, invalid_key}.
+-spec set(binary(), any()) ->
+    {ok, created | updated} | {error, invalid_key | store_full}.
 set(<<>>, _Value) ->
     {error, invalid_key};
 set(Key, Value) ->
@@ -78,7 +107,9 @@ get(<<>>) ->
     {error, invalid_key};
 get(Key) ->
     try ets:lookup(?TABLE, Key) of
-        [{Key, Value}] -> {ok, Key, Value};
+        %% Rows carry the entry's byte charge as a third element; a reader
+        %% has no use for it.
+        [{Key, Value, _Bytes}] -> {ok, Key, Value};
         [] -> {error, not_found}
     catch
         %% No table means no owner: the store is down or restarting.
@@ -97,7 +128,7 @@ clear_all() ->
 
 -spec get_all() -> map().
 get_all() ->
-    try maps:from_list(ets:tab2list(?TABLE))
+    try maps:from_list([{K, V} || {K, V, _Bytes} <- ets:tab2list(?TABLE)])
     catch error:badarg -> #{}
     end.
 
@@ -123,34 +154,62 @@ init([]) ->
     %% protected: this process is the only writer, everyone reads. Owned
     %% here so the data dies with the store exactly as the map did.
     ?TABLE = ets:new(?TABLE, [named_table, protected, {read_concurrency, true}]),
-    {ok, ?TABLE}.
+    %% bytes is a running total of what the table holds. Keeping it exact
+    %% costs nothing precisely because writes are serialised here: no other
+    %% process can change the table between reading this number and acting
+    %% on it. A public table would need a counter and a race to go with it.
+    {ok, #{table => ?TABLE, bytes => 0}}.
 
 %% Writes stay here. Serialising them is what makes created-vs-updated a
 %% single atomic decision -- ets:insert_new/2 answers it in the same
 %% operation that does the write, and no other writer can be in flight.
-handle_call({set, Key, Value}, _From, T) ->
-    Outcome = case ets:insert_new(T, {Key, Value}) of
+handle_call({set, Key, Value}, _From, #{table := T, bytes := Bytes} = S) ->
+    Size = entry_bytes(Key, Value),
+    Max = max_bytes(),
+    case Bytes + Size =< Max of
         true ->
-            created;
+            %% Fits even charged as a brand-new entry, so no rejection is
+            %% possible here and insert_new/2 still decides created versus
+            %% replaced in the operation that does the write. The size of
+            %% whatever it replaced comes back in O(1) from the row.
+            case ets:insert_new(T, {Key, Value, Size}) of
+                true ->
+                    {reply, {ok, created}, S#{bytes := Bytes + Size}};
+                false ->
+                    Freed = ets:lookup_element(T, Key, 3),
+                    true = ets:insert(T, {Key, Value, Size}),
+                    {reply, {ok, updated}, S#{bytes := Bytes - Freed + Size}}
+            end;
         false ->
-            true = ets:insert(T, {Key, Value}),
-            updated
-    end,
-    {reply, {ok, Outcome}, T};
+            %% Over the ceiling if this is new -- but replacing a larger
+            %% entry can still fit, so look before writing. insert_new
+            %% followed by an undo would be shorter and would let a reader
+            %% see a key that was never accepted.
+            case ets:lookup(T, Key) of
+                [{_, _, Freed}] when Bytes - Freed + Size =< Max ->
+                    true = ets:insert(T, {Key, Value, Size}),
+                    {reply, {ok, updated}, S#{bytes := Bytes - Freed + Size}};
+                _ ->
+                    {reply, {error, store_full}, S}
+            end
+    end;
 %% ets:take/2 removes the entry and reports what was there in one
 %% operation, so telling a delete from a miss does not depend on nothing
 %% happening between a member/2 and a delete/2. It only ever ran here, with
 %% one writer, so the old pair was safe -- but it was safe by virtue of the
 %% serialisation rather than on its own, which is exactly the difference
 %% insert_new/2 already avoids on the write side.
-handle_call({delete, Key}, _From, T) ->
+handle_call({delete, Key}, _From, #{table := T, bytes := Bytes} = S) ->
+    %% take/2 hands back the row it removed, so the entry's own charge is
+    %% right there to refund -- no second lookup, and no way for the total
+    %% to drift from what the table holds.
     case ets:take(T, Key) of
-        [_Entry] -> {reply, ok, T};
-        [] -> {reply, {error, not_found}, T}
+        [{_, _, Freed}] -> {reply, ok, S#{bytes := Bytes - Freed}};
+        [] -> {reply, {error, not_found}, S}
     end;
-handle_call(clear_all, _From, T) ->
+handle_call(clear_all, _From, #{table := T} = S) ->
     true = ets:delete_all_objects(T),
-    {reply, ok, T}.
+    {reply, ok, S#{bytes := 0}}.
 
 handle_cast(_Msg, State) ->
     {noreply, State}.

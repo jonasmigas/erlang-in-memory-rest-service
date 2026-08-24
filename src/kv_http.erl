@@ -255,6 +255,13 @@ write(Key, Value, Req) ->
                              status => <<"stored">>}, Req);
                 {error, invalid_key} ->
                     reply(400, #{error => <<"invalid_key">>}, Req);
+                %% 507, not 503: the store is up and answering, and this
+                %% request will not succeed on retry either. The client
+                %% has to delete something or send less, which is what
+                %% separates it from the unavailable case below.
+                {error, store_full} ->
+                    kv_metrics:store_op(set, rejected),
+                    reply(507, #{error => <<"store_full">>}, Req);
                 {error, unavailable} ->
                     unavailable(Req)
             end

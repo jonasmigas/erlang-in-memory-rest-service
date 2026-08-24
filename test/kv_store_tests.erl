@@ -144,3 +144,46 @@ overwrite_test() ->
     ok = kv_store:delete(<<"key">>),
     {ok, created} = kv_store:set(<<"key">>, "third"),
     teardown(ok).
+
+%% The store is bounded, so a client cannot walk it into a node's memory
+%% one write at a time. The ceiling is in bytes rather than entries: with
+%% values capped at 1 MiB by the HTTP layer, a million-entry ceiling would
+%% still permit a terabyte.
+quota_test() ->
+    setup(),
+    ok = application:set_env(kv_store, max_bytes, 4000),
+    try
+        ?assertEqual({ok, created}, kv_store:set(<<"q1">>, binary:copy(<<"s">>, 100))),
+
+        %% A value past the ceiling on its own is refused...
+        ?assertEqual({error, store_full},
+                     kv_store:set(<<"q2">>, binary:copy(<<"b">>, 5000))),
+        %% ...and the refusal leaves nothing behind, which an insert
+        %% followed by an undo would not guarantee.
+        ?assertEqual({error, not_found}, kv_store:get(<<"q2">>)),
+
+        %% Replacing an entry with a smaller one always fits.
+        ?assertEqual({ok, updated}, kv_store:set(<<"q1">>, <<"tiny">>)),
+
+        %% Filling most of the budget leaves no room for a second big one.
+        ?assertEqual({ok, created}, kv_store:set(<<"q3">>, binary:copy(<<"x">>, 3000))),
+        ?assertEqual({error, store_full},
+                     kv_store:set(<<"q4">>, binary:copy(<<"x">>, 3000))),
+
+        %% Replacing that entry with a smaller one is accepted even though
+        %% the same bytes arriving as a new key would not be -- the write
+        %% frees what it replaces.
+        ?assertEqual({ok, updated}, kv_store:set(<<"q3">>, binary:copy(<<"x">>, 2000))),
+
+        %% Deleting refunds the budget, so the write that just failed now
+        %% succeeds. This is the accounting that drifts if a refund is
+        %% missed anywhere.
+        ok = kv_store:delete(<<"q3">>),
+        ?assertEqual({ok, created}, kv_store:set(<<"q4">>, binary:copy(<<"x">>, 3000))),
+
+        %% And clearing returns the whole budget.
+        ok = kv_store:clear_all(),
+        ?assertEqual({ok, created}, kv_store:set(<<"q5">>, binary:copy(<<"x">>, 3000)))
+    after
+        application:unset_env(kv_store, max_bytes)
+    end.

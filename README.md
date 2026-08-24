@@ -14,6 +14,8 @@ A simple in-memory key-value store with a REST API, built in Erlang using OTP an
   serialised so that created-versus-replaced is a single atomic decision
 - **Fault-tolerant** under OTP supervision: the listener keeps serving
   while the store restarts, and vice versa
+- **Bounded**: a byte ceiling the store refuses to write past, so no
+  client can walk the node out of memory
 - **Health and metrics endpoints** for monitoring
 
 ## Requirements
@@ -125,9 +127,9 @@ on 8080; under Docker (`make up`) use 18080.
 | Method | Endpoint | Request body | Success | Errors |
 |--------|----------|--------------|---------|--------|
 | `GET` | `/store/:key` | — | `200` `{"key":...,"value":...}` | `404` `key_not_found` |
-| `POST` | `/store/:key` | `{"value": ...}` | `201` created / `200` replaced | `400`, `408`, `413` |
-| `POST` | `/store` | `{"key": ..., "value": ...}` | `201` created / `200` replaced | `400`, `408`, `413` |
-| `PUT` | `/store/:key` | `{"value": ...}` | `201` created / `200` replaced | `400`, `408`, `413` |
+| `POST` | `/store/:key` | `{"value": ...}` | `201` created / `200` replaced | `400`, `408`, `413`, `507` |
+| `POST` | `/store` | `{"key": ..., "value": ...}` | `201` created / `200` replaced | `400`, `408`, `413`, `507` |
+| `PUT` | `/store/:key` | `{"value": ...}` | `201` created / `200` replaced | `400`, `408`, `413`, `507` |
 | `DELETE` | `/store/:key` | — | `204` | `404` `key_not_found` |
 | `GET` | `/health` | — | `200` `{"status":"ok",...}` | `503` `store_unavailable` |
 | `GET` | `/metrics` | — | `200` Prometheus text | — |
@@ -156,7 +158,21 @@ accept a write. A path that matches no route returns `404` `not_found`.
 
 A missing or empty key, or a malformed JSON body, returns `400`. A body
 over the size limit returns `413`; one that stops arriving part-way
-returns `408`, which is retryable where `413` is not. If the store itself
+returns `408`, which is retryable where `413` is not.
+
+The store is bounded, and a write that would take it past `max_bytes`
+returns `507` `store_full` -- a different refusal from `413`, which is
+about this request being too large. `507` says the request is fine and
+there is nowhere to put it, so retrying helps only once something has been
+deleted.
+
+The ceiling defaults to 1 GiB of accounted bytes and should be set from the
+memory the node actually has -- `max_bytes` is an application environment
+value, so `config/sys.config` or a `-kv_store max_bytes 268435456` VM flag
+sets it, the same way the image sets the port. `infinity` turns it off,
+which is the behaviour before it existed: a memory leak with an API.
+[DESIGN](DESIGN.md#capacity) turns a byte figure into an entry count for a
+given value size. If the store itself
 cannot be reached, the answer is `503` `store_unavailable` -- the HTTP
 listener stays up across a store restart, so this is a state a client can
 observe. `/health` answers `503` in that same window rather than `200`,
