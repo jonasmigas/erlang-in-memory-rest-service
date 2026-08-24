@@ -39,6 +39,14 @@ jobs:
       - name: Report line coverage
         run: make cover
 
+      # bench/ is outside the default and test profiles, so nothing above
+      # compiles it: the harnesses could stop building and the suite would
+      # still be green, leaving a reviewer to find out by running `make
+      # bench`. Compiling is enough -- the measurements themselves are too
+      # noisy on a shared runner to assert anything about.
+      - name: Compile the benchmark harnesses
+        run: docker compose run --rm kv_store rebar3 as bench compile
+
       # `make release` builds the runtime stage and then boots the image and
       # asks it for /health, so this also covers the failure the tests cannot
       # see: a release that compiles and cannot start.
