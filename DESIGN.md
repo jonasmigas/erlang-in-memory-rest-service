@@ -191,11 +191,37 @@ Memory is the first ceiling and the easiest to reason about — the table
 above says where it is for a given value size.
 
 The second is writes. They still go through one process by design, because
-that is what makes created-vs-updated atomic. The gen_server column in the
-throughput table is what that path costs: a few hundred thousand operations
-a second, and close to flat as callers are added. Reads no longer share
-that limit; writes do. This has not been measured directly for writes, and
-the read figure is being used as a proxy for the same mechanism.
+that is what makes created-vs-updated atomic, and `make bench` measures
+what that costs:
+
+| writers | ops/s | vs 1 writer |
+|---------|-------|-------------|
+| 1       | ~252k | 1.00x       |
+| 2       | ~300k | 1.19x       |
+| 4       | ~372k | 1.48x       |
+| 8       | ~464k | 1.84x       |
+
+Eight writers buy 1.84x, which is the serialisation showing plainly: the
+process handles one message at a time and extra callers mostly keep its
+mailbox from going empty rather than adding parallelism.
+
+The conclusion is less dramatic than the shape suggests, and worth stating
+because the shape invites the opposite one. The ceiling is around 460k
+writes a second on one node -- on four cores, on a laptop, through Docker
+Desktop. That is a great deal of writing. Removing the serialisation is
+possible and is described below, but it should be done because a
+measurement says the ceiling is being approached, not because a graph
+flattens.
+
+Two ways to remove it if it ever matters. Writes could go straight to a
+public table with `write_concurrency`, since `ets:insert_new/2` is itself
+atomic and answers created-vs-updated on its own -- at the cost of a
+narrow race where a concurrent delete between the failed insert and the
+overwrite makes "updated" the wrong word. Or the store could be sharded
+across N processes by `phash2(Key) rem N`, keeping the guarantee exactly
+and paying for it in `get_all/0` and `clear_all/0` becoming fan-outs. The
+first is simpler and loosens a guarantee; the second is more machinery and
+keeps it.
 
 Past either ceiling the answer is more nodes, and then the question is how
 keys are divided. Consistent hashing over the key is the usual choice and
