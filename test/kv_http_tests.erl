@@ -77,8 +77,10 @@ http_test_() ->
        fun overwrite_is_not_created/0},
       {"a wedged store still serves reads and 503s writes",
        {timeout, 30, fun store_unavailable/0}},
-      {"300 concurrent writes then 300 concurrent reads agree",
-       {timeout, 120, fun concurrent_load/0}},
+      {"exactly one concurrent writer creates the key",
+       {timeout, 120, fun one_create_wins/0}},
+      {"reads stay correct while writes are in flight",
+       {timeout, 120, fun reads_during_writes/0}},
       {"a body that never arrives is a 408, not a 413",
        {timeout, 30, fun slow_body_is_a_timeout/0}},
       {"a body over the cap is still a 413", {timeout, 30, fun oversized_body/0}},
@@ -519,51 +521,110 @@ listener_restart() ->
     ?assertEqual(200, Status),
     ?assertEqual(<<"alive">>, maps:get(<<"value">>, Body)).
 
-%% The design document claims this result; until now nothing produced it.
-%% Every other test here drives one request at a time, so the property the
-%% whole store design rests on -- that concurrent requests do not queue
-%% behind each other and do not see each other's data -- was the one
-%% property never exercised.
+%% Fifty writers, one key that does not exist yet: exactly one of them
+%% created it, so exactly one 201 and forty-nine 200s. Never two clients
+%% both told they were first.
 %%
-%% Each writer sends a value derived from its own key, so a read that
-%% returns the wrong value proves requests crossed, which a plain 200 would
-%% not catch.
-concurrent_load() ->
-    N = 300,
-    Keys = [concurrent_key(I) || I <- lists:seq(1, N)],
-
+%% Worth being precise about what this does and does not catch. Every
+%% write goes through one process today, so a lookup followed by an insert
+%% would pass this too -- the serialisation, not insert_new/2, is what
+%% makes it hold. What it guards is the property surviving a change to
+%% that: move the writes to a public table and decide created-versus-
+%% replaced with two operations, and two writers see an absent key and
+%% two clients are told they created it. That is the refactor this fails
+%% on, and it is the one DESIGN.md describes as tempting.
+one_create_wins() ->
+    Key = "conc_create",
+    N = 50,
     with_parallel_sessions(
       fun() ->
-              Writes = pmap(fun(K) ->
-                                    request(put, "/store/" ++ binary_to_list(K),
-                                            "{\"value\": \"" ++
-                                                binary_to_list(concurrent_value(K)) ++ "\"}")
-                            end, Keys),
-              ?assertEqual([], [W || W <- Writes, not is_created(W)]),
+              Results = pmap(fun(I) ->
+                                     request(put, "/store/" ++ Key,
+                                             "{\"value\": \"w" ++
+                                                 integer_to_list(I) ++ "\"}")
+                             end, lists:seq(1, N)),
+              Statuses = [St || {St, _} <- Results],
+              ?assertEqual(N, length(Statuses)),
+              ?assertEqual(1, length([St || St <- Statuses, St =:= 201])),
+              ?assertEqual(N - 1, length([St || St <- Statuses, St =:= 200])),
 
-              Reads = pmap(fun(K) ->
-                                   {K, request(get, "/store/" ++ binary_to_list(K))}
-                           end, Keys),
-              ?assertEqual([], [R || R <- Reads, not read_matches(R)]),
-              ?assertEqual(N, length(Reads))
+              %% and the key holds one of the values actually sent, not a
+              %% mixture of two of them
+              {200, Body} = request(get, "/store/" ++ Key),
+              Sent = [list_to_binary("w" ++ integer_to_list(I))
+                      || I <- lists:seq(1, N)],
+              ?assert(lists:member(maps:get(<<"value">>, Body), Sent))
       end).
 
-concurrent_key(I) ->
+%% Every other test drives one request at a time, so the property this
+%% design exists for -- reads that do not queue behind writes and do not
+%% see each other's data -- was never exercised. Reads and writes here run
+%% in one batch, so they genuinely overlap.
+%%
+%% Each key is seeded, then rewritten while readers read it. A read must
+%% return its own key and either the old value or the new one: never a
+%% torn mixture, never another key's data, and never a 5xx. A write to a
+%% key that already exists must report 200, so a concurrent update can
+%% never announce itself as a create.
+reads_during_writes() ->
+    N = 100,
+    Keys = [conc_key(I) || I <- lists:seq(1, N)],
+    with_parallel_sessions(
+      fun() ->
+              Seeded = pmap(fun(K) -> put_value(K, conc_value(K, old)) end, Keys),
+              ?assertEqual([], [S || S <- Seeded, S =/= 201]),
+
+              %% Interleaved, so the batch does not run as writes-then-reads
+              %% even if the scheduler is feeling orderly. Two readers per
+              %% writer.
+              Tasks = lists:flatten([[{write, K}, {read, K}, {read, K}]
+                                     || K <- Keys]),
+              Results = pmap(fun run_task/1, Tasks),
+              ?assertEqual([], [R || R <- Results, R =/= ok]),
+
+              %% and after the storm every key holds its new value
+              Final = pmap(fun(K) -> {K, request(get, "/store/" ++ b2l(K))} end, Keys),
+              ?assertEqual([], [F || F <- Final, not settled(F)])
+      end).
+
+run_task({write, K}) ->
+    case put_value(K, conc_value(K, new)) of
+        200 -> ok;
+        Other -> {write_was_not_an_update, K, Other}
+    end;
+run_task({read, K}) ->
+    case request(get, "/store/" ++ b2l(K)) of
+        {200, Body} ->
+            Value = maps:get(<<"value">>, Body, undefined),
+            SameKey = maps:get(<<"key">>, Body, undefined) =:= K,
+            Known = lists:member(Value, [conc_value(K, old), conc_value(K, new)]),
+            case SameKey andalso Known of
+                true -> ok;
+                false -> {read_saw_the_wrong_thing, K, Body}
+            end;
+        Other ->
+            {read_was_not_ok, K, Other}
+    end.
+
+settled({K, {200, Body}}) ->
+    maps:get(<<"value">>, Body, undefined) =:= conc_value(K, new);
+settled(_) ->
+    false.
+
+put_value(Key, Value) ->
+    {Status, _} = request(put, "/store/" ++ b2l(Key),
+                          "{\"value\": \"" ++ b2l(Value) ++ "\"}"),
+    Status.
+
+conc_key(I) ->
     iolist_to_binary(["conc_", integer_to_list(I)]).
 
-%% Distinct per key, so a crossed response is a failed assertion rather
-%% than a coincidence.
-concurrent_value(Key) ->
-    <<"value_of_", Key/binary>>.
+%% Derived from the key, so a response that belongs to another key fails
+%% rather than passing as a coincidence.
+conc_value(Key, old) -> <<"old_of_", Key/binary>>;
+conc_value(Key, new) -> <<"new_of_", Key/binary>>.
 
-is_created({201, _}) -> true;
-is_created(_) -> false.
-
-read_matches({Key, {200, Body}}) ->
-    maps:get(<<"key">>, Body, undefined) =:= Key andalso
-        maps:get(<<"value">>, Body, undefined) =:= concurrent_value(Key);
-read_matches(_) ->
-    false.
+b2l(B) -> binary_to_list(B).
 
 %% ===================================================================
 %% Helpers

@@ -143,11 +143,21 @@ change every verb timed out. `kv_store_tests` covers the other end — with
 no store running at all, `get/1` returns `{error, unavailable}` rather than
 crashing its caller.
 
-Correctness under load: `kv_http_tests` drives 300 concurrent writes
-followed by 300 concurrent reads, each writer sending a value derived from
-its own key, and asserts every reader gets its own value back -- 300/300,
-no 5xx. A crossed response fails the assertion rather than passing as a
-plain 200.
+Correctness under load, in `kv_http_tests`, is two assertions rather than
+a throughput figure.
+
+Fifty writers race to create one key that does not exist: exactly one is
+answered `201` and forty-nine `200`. Two clients are never both told they
+were first. That property holds today because writes go through one
+process, and the test is what would catch its loss if they ever did not.
+
+Then a hundred keys are rewritten while two hundred readers read them, in
+one interleaved batch so the two genuinely overlap. Every read must return
+its own key and either the value it had or the value being written --
+never a mixture, never another key's data, never a 5xx -- and every write
+to an existing key must answer `200`, so an update under concurrency can
+never announce itself as a create. Both fail loudly when the read path is
+made to return the wrong value, which is how they were checked.
 
 ### What is not measured
 
