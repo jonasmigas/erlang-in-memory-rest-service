@@ -16,7 +16,8 @@ the rest is the reasoning behind them:
 
 The limits are stated as plainly as the capabilities:
 [no durability](#durability), [no authentication](#security), and
-[no expiry](#what-this-is-not-a-cache).
+[no expiry](#what-this-is-not-a-cache). What more than one node would
+take, and what it would break, is under [scaling out](#scaling-out).
 
 ## Architecture
 
@@ -343,11 +344,55 @@ and paying for it in `get_all/0` and `clear_all/0` becoming fan-outs. The
 first is simpler and loosens a guarantee; the second is more machinery and
 keeps it.
 
-Past either ceiling the answer is more nodes, and then the question is how
-keys are divided. Consistent hashing over the key is the usual choice and
-fits here, since every operation names exactly one key and nothing spans
-two — there are no multi-key transactions to break. What it costs is that
-`get_all/0` and `clear_all/0` stop being single answers.
+### Scaling out
+
+Past either ceiling the answer is more nodes, and the arithmetic is two
+independent divisions: how many nodes hold the working set, and how many
+serve the traffic. Take the larger. Using the figures measured above --
+about 20k requests a second through HTTP per node, and the capacity table
+for bytes -- against 12 GiB of usable memory a node:
+
+| working set   | traffic     | nodes for memory | for throughput | nodes |
+|---------------|-------------|------------------|----------------|-------|
+| 50M x 256 B   | 100k req/s  | 2                | 5              | 5     |
+| 50M x 1 KiB   | 100k req/s  | 5                | 5              | 5     |
+| 200M x 256 B  | 50k req/s   | 8                | 3              | 8     |
+
+The useful thing that falls out is which division wins. For small values
+under real traffic it is throughput, not memory -- and throughput is set
+by the transport, not by the store, which serves fifteen times what the
+HTTP layer delivers. So the cheapest way to need fewer machines is not a
+faster store or more of them; it is fewer round trips per operation.
+Batching keys into one request, or a binary protocol instead of JSON over
+HTTP/1.1, moves that divisor by an order of magnitude. Nothing here has
+measured it, which is the next thing worth measuring.
+
+Keys divide by consistent hashing. It fits without argument because every
+operation names exactly one key and nothing spans two -- there are no
+multi-key transactions to break, so no coordination is needed between
+nodes at all. Three things do break, and they are the reasons this is
+described rather than built:
+
+**A node's keys die with it.** There is no replication, and the data is in
+memory, so losing a node loses its share. Behind a source of truth that is
+a burst of misses; as the only copy it is data loss. Replicating to the
+next node on the ring costs twice the memory and makes every write a
+two-node operation, which is a different system from this one.
+
+**Adding a node moves about 1/N of the keys** to an owner that does not
+have them. Consistent hashing keeps the churn small, but small churn still
+means those keys read as absent until something refills them. Fine with a
+backing store; a correctness problem without one.
+
+**Hot keys do not shard.** Hashing spreads keys, not load: one key that
+everybody reads lands on one node, and that node's ~22k reads a second is
+the ceiling for it no matter how large the fleet. A leaderboard entry or a
+popular item behaves exactly like this. The answers are replicating hot
+keys read-only, or a short-TTL cache in the client -- both of which need
+someone to decide what "hot" means.
+
+And `get_all/0` and `clear_all/0` stop being single answers, becoming
+fan-outs across the ring.
 
 ### What this is not: a cache
 
