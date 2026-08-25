@@ -559,7 +559,21 @@ one_create_wins() ->
 %% Every other test drives one request at a time, so the property this
 %% design exists for -- reads that do not queue behind writes and do not
 %% see each other's data -- was never exercised. Reads and writes here run
-%% in one batch, so they genuinely overlap.
+%% in one batch.
+%%
+%% That they overlap was checked rather than assumed: sampling ranch's
+%% connection count through a run peaked at 170 sockets open at the
+%% listener, and at 19 with httpc left on its default two sessions. No
+%% assertion is made about either figure. An idle keep-alive connection
+%% counts the same as a busy one, so the number cannot prove a hundred
+%% handlers ran in the same microsecond, and a threshold loose enough to
+%% be stable would not have caught the throttled case anyway.
+%%
+%% So this test asserts correctness while requests overlap, and nothing
+%% about the degree of overlap. store_unavailable/0 is the deterministic
+%% proof of the other half: with the store suspended, reads keep answering
+%% 200 while writes report 503, which can only happen if a read never
+%% enters the mailbox.
 %%
 %% Each key is seeded, then rewritten while readers read it. A read must
 %% return its own key and either the old value or the new one: never a
