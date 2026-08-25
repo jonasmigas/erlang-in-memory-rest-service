@@ -284,6 +284,38 @@ So a 16 GiB node with headroom for the VM and the network stack holds on
 the order of 10M entries at 1 KiB each, or tens of millions of
 small ones. Doubling the key size moves it; the shape does not.
 
+### What the node needs, not what the table holds
+
+`max_bytes` bounds the table. It does not bound the process, and the
+difference is a gap big enough to kill a node that looks correctly
+configured.
+
+Bodies are accepted up to 1 MiB and read into memory as they arrive, and
+ranch's default allows 1024 connections at once. A burst of large
+concurrent writes is therefore up to **1 GiB of memory the ceiling never
+sees**, on top of whatever the table already holds. It needs no attacker
+-- a client library retrying large writes is enough. So the budget is:
+
+```
+node memory  >=  max_bytes                          (the table)
+              +  max_connections x max_body_size    (bodies in flight)
+              +  the runtime itself
+```
+
+The last term is about 70 MiB, measured as the idle resident size of the
+release image. With the defaults -- a 1 GiB ceiling, 1024 connections,
+1 MiB bodies -- that is roughly 2.1 GiB for a node advertised as holding
+one. Give it the headroom or turn down one of the three; what does not
+work is setting the container limit to `max_bytes` and assuming the rest
+is rounding.
+
+One thing that does hold up: the charge itself is close to real memory.
+Against the table above, an entry is charged a few per cent more than the
+VM was measured to spend on it -- 236 bytes against 221 for a 16-byte
+value, 1244 against 1233 for a 1 KiB one. Conservative, which is the right
+direction for a ceiling, and it means `max_bytes` can be read as bytes of
+memory rather than as an abstract budget.
+
 ### Where one node stops
 
 Memory is the first ceiling and the easiest to reason about — the table
@@ -507,6 +539,9 @@ that are simply absent.
   what the table may hold, and a write past it is refused with `507`
   rather than taken. The running total is kept exactly, which costs
   nothing only because writes are already serialised through one process.
+  It bounds the table and not the node -- bodies in flight are outside it,
+  and [the memory budget](#what-the-node-needs-not-what-the-table-holds)
+  is the arithmetic that matters when sizing one.
 - ranch caps concurrent connections at 1024, its default, unchanged.
 
 ### What is absent

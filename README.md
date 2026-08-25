@@ -168,6 +168,11 @@ about this request being too large. `507` says the request is fine and
 there is nowhere to put it, so retrying helps only once something has been
 deleted.
 
+The ceiling bounds the table, not the node: request bodies in flight are
+outside it, so a node needs `max_bytes` plus `max_connections x 1 MiB`
+plus the runtime before it is safely sized -- see
+[DESIGN](DESIGN.md#what-the-node-needs-not-what-the-table-holds).
+
 The ceiling defaults to 1 GiB of accounted bytes and should be set from the
 memory the node actually has -- `max_bytes` is an application environment
 value, so `config/sys.config` or a `-kv_store max_bytes 268435456` VM flag
