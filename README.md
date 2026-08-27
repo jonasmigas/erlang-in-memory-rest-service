@@ -1,6 +1,6 @@
 # KV Store - In-Memory Key-Value HTTP REST Service
 
-[![CI](https://github.com/jonasmigas/miniclip-assessment/actions/workflows/ci.yml/badge.svg)](https://github.com/jonasmigas/miniclip-assessment/actions/workflows/ci.yml)
+[![CI](https://github.com/jonasmigas/erlang-in-memory-rest-service/actions/workflows/ci.yml/badge.svg)](https://github.com/jonasmigas/erlang-in-memory-rest-service/actions/workflows/ci.yml)
 
 A simple in-memory key-value store with a REST API, built in Erlang using OTP and Cowboy.
 
