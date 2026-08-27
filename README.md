@@ -253,3 +253,10 @@ git config core.hooksPath .githooks
 - `pre-commit` **warns** when files under `src/` are staged without any
   file under `test/`, as a reminder that behaviour changes belong with
   their tests.
+
+## How this was built
+
+Developed with [Claude Code](https://claude.com/claude-code), Anthropic's CLI
+for Claude -- the Erlang, the tests, the Docker and CI setup, and the prose
+here and in [DESIGN](DESIGN.md). The conventions it worked under are in
+[CLAUDE.md](CLAUDE.md).
